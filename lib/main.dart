@@ -303,27 +303,46 @@ class OperatorDashboardPage extends StatefulWidget {
 
 class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
   final http.Client _client = http.Client();
+  final TextEditingController _itemSearchController = TextEditingController();
+  final TextEditingController _warehouseSearchController =
+      TextEditingController();
   StreamSubscription<String>? _streamSubscription;
   int _streamGeneration = 0;
   int _selectedSection = 0;
-  int? _selectedProductIndex;
-  bool _batchRequested = false;
+  Timer? _itemSearchDebounce;
+  Timer? _warehouseSearchDebounce;
 
   bool _manualLoading = false;
   bool _requestInFlight = false;
+  bool _itemsLoading = false;
+  bool _warehousesLoading = false;
+  bool _batchActionLoading = false;
   bool _connected = false;
   String _statusText = 'idle';
   String _errorText = '';
+  String _itemsError = '';
+  String _warehousesError = '';
   MonitorSnapshot _snapshot = MonitorSnapshot.empty();
+  List<MobileItem> _items = const [];
+  List<MobileWarehouse> _warehouses = const [];
+  MobileItem? _selectedItem;
+  MobileWarehouse? _selectedWarehouse;
 
   @override
   void initState() {
     super.initState();
+    _itemSearchController.addListener(_scheduleItemSearch);
+    _warehouseSearchController.addListener(_scheduleWarehouseSearch);
     _startLiveStream();
+    unawaited(_loadItems());
   }
 
   @override
   void dispose() {
+    _itemSearchDebounce?.cancel();
+    _warehouseSearchDebounce?.cancel();
+    _itemSearchController.dispose();
+    _warehouseSearchController.dispose();
     _stopLiveStream();
     _client.close();
     super.dispose();
@@ -410,7 +429,7 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
                 return;
               }
               setState(() {
-                _snapshot = MonitorSnapshot.fromJson(payload);
+                _applySnapshot(MonitorSnapshot.fromJson(payload));
                 _connected = true;
                 _statusText = 'live';
                 _errorText = '';
@@ -476,7 +495,7 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
       final payload = jsonDecode(monitor.body) as Map<String, dynamic>;
       if (mounted) {
         setState(() {
-          _snapshot = MonitorSnapshot.fromJson(payload);
+          _applySnapshot(MonitorSnapshot.fromJson(payload));
           _connected = true;
           _statusText = 'connected';
           _errorText = '';
@@ -497,6 +516,252 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
           _manualLoading = false;
         });
       }
+    }
+  }
+
+  void _applySnapshot(MonitorSnapshot snapshot) {
+    _snapshot = snapshot;
+    if (snapshot.batchActive) {
+      if (snapshot.batchItemCode.isNotEmpty) {
+        _selectedItem = MobileItem(
+          itemCode: snapshot.batchItemCode,
+          itemName: snapshot.batchItemName.isEmpty
+              ? snapshot.batchItemCode
+              : snapshot.batchItemName,
+        );
+      }
+      if (snapshot.batchWarehouse.isNotEmpty) {
+        _selectedWarehouse = MobileWarehouse(
+          warehouse: snapshot.batchWarehouse,
+        );
+      }
+    }
+  }
+
+  Uri _apiUri(String path, [Map<String, String?> query = const {}]) {
+    final filtered = <String, String>{};
+    for (final entry in query.entries) {
+      final value = entry.value?.trim() ?? '';
+      if (value.isNotEmpty) {
+        filtered[entry.key] = value;
+      }
+    }
+    return Uri.parse(
+      '${widget.server.endpoint.baseUrl}$path',
+    ).replace(queryParameters: filtered.isEmpty ? null : filtered);
+  }
+
+  void _scheduleItemSearch() {
+    _itemSearchDebounce?.cancel();
+    _itemSearchDebounce = Timer(const Duration(milliseconds: 220), () {
+      unawaited(_loadItems(query: _itemSearchController.text));
+    });
+  }
+
+  void _scheduleWarehouseSearch() {
+    if (_selectedItem == null) {
+      return;
+    }
+    _warehouseSearchDebounce?.cancel();
+    _warehouseSearchDebounce = Timer(const Duration(milliseconds: 220), () {
+      unawaited(
+        _loadWarehouses(
+          itemCode: _selectedItem!.itemCode,
+          query: _warehouseSearchController.text,
+        ),
+      );
+    });
+  }
+
+  Future<void> _loadItems({String query = ''}) async {
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _itemsLoading = true;
+      _itemsError = '';
+    });
+    try {
+      final response = await _client
+          .get(_apiUri('/v1/mobile/items', {'query': query, 'limit': '12'}))
+          .timeout(const Duration(seconds: 3));
+      if (response.statusCode < 200 || response.statusCode > 299) {
+        throw Exception('items ${response.statusCode}');
+      }
+      final payload = jsonDecode(response.body) as Map<String, dynamic>;
+      final rawItems =
+          (payload['items'] as List?)?.cast<Map<String, dynamic>>() ?? const [];
+      final items = rawItems.map(MobileItem.fromJson).toList(growable: false);
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _items = items;
+        _itemsLoading = false;
+        if (_selectedItem != null &&
+            items.every((item) => item.itemCode != _selectedItem!.itemCode) &&
+            !_snapshot.batchActive) {
+          _selectedItem = null;
+          _selectedWarehouse = null;
+          _warehouses = const [];
+        }
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _itemsLoading = false;
+        _itemsError = error.toString();
+      });
+    }
+  }
+
+  Future<void> _loadWarehouses({
+    required String itemCode,
+    String query = '',
+  }) async {
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _warehousesLoading = true;
+      _warehousesError = '';
+    });
+    try {
+      final response = await _client
+          .get(
+            _apiUri(
+              '/v1/mobile/items/${Uri.encodeComponent(itemCode)}/warehouses',
+              {'query': query, 'limit': '12'},
+            ),
+          )
+          .timeout(const Duration(seconds: 3));
+      if (response.statusCode < 200 || response.statusCode > 299) {
+        throw Exception('warehouses ${response.statusCode}');
+      }
+      final payload = jsonDecode(response.body) as Map<String, dynamic>;
+      final rawWarehouses =
+          (payload['warehouses'] as List?)?.cast<Map<String, dynamic>>() ??
+          const [];
+      final warehouses = rawWarehouses
+          .map(MobileWarehouse.fromJson)
+          .toList(growable: false);
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _warehouses = warehouses;
+        _warehousesLoading = false;
+        if (_selectedWarehouse != null &&
+            warehouses.every(
+              (warehouse) =>
+                  warehouse.warehouse != _selectedWarehouse!.warehouse,
+            ) &&
+            !_snapshot.batchActive) {
+          _selectedWarehouse = null;
+        }
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _warehousesLoading = false;
+        _warehousesError = error.toString();
+      });
+    }
+  }
+
+  Future<void> _selectItem(MobileItem item) async {
+    setState(() {
+      _selectedItem = item;
+      _selectedWarehouse = null;
+      _warehouses = const [];
+      _warehouseSearchController.clear();
+    });
+    await _loadWarehouses(itemCode: item.itemCode);
+  }
+
+  Future<void> _startBatch() async {
+    final item = _selectedItem;
+    final warehouse = _selectedWarehouse;
+    if (item == null || warehouse == null || _batchActionLoading) {
+      return;
+    }
+    setState(() {
+      _batchActionLoading = true;
+      _warehousesError = '';
+    });
+    try {
+      final response = await _client
+          .post(
+            _apiUri('/v1/mobile/batch/start'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'item_code': item.itemCode,
+              'item_name': item.itemName,
+              'warehouse': warehouse.warehouse,
+            }),
+          )
+          .timeout(const Duration(seconds: 4));
+      if (response.statusCode < 200 || response.statusCode > 299) {
+        throw Exception('batch start ${response.statusCode}');
+      }
+      final payload = jsonDecode(response.body) as Map<String, dynamic>;
+      final batch =
+          (payload['batch'] as Map?)?.cast<String, dynamic>() ?? const {};
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _snapshot = _snapshot.copyWithBatch(MobileBatchState.fromJson(batch));
+        _batchActionLoading = false;
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _batchActionLoading = false;
+        _warehousesError = error.toString();
+      });
+    }
+  }
+
+  Future<void> _stopBatch() async {
+    if (_batchActionLoading) {
+      return;
+    }
+    setState(() {
+      _batchActionLoading = true;
+      _warehousesError = '';
+    });
+    try {
+      final response = await _client
+          .post(_apiUri('/v1/mobile/batch/stop'))
+          .timeout(const Duration(seconds: 4));
+      if (response.statusCode < 200 || response.statusCode > 299) {
+        throw Exception('batch stop ${response.statusCode}');
+      }
+      final payload = jsonDecode(response.body) as Map<String, dynamic>;
+      final batch =
+          (payload['batch'] as Map?)?.cast<String, dynamic>() ?? const {};
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _snapshot = _snapshot.copyWithBatch(MobileBatchState.fromJson(batch));
+        _batchActionLoading = false;
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _batchActionLoading = false;
+        _warehousesError = error.toString();
+      });
     }
   }
 
@@ -755,10 +1020,9 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
     ColorScheme scheme,
     DiscoveredServer server,
   ) {
-    final selectedProduct = _selectedProductIndex == null
-        ? null
-        : _controlProducts[_selectedProductIndex!];
-    final batchRunning = _batchRequested;
+    final selectedProduct = _selectedItem;
+    final selectedWarehouse = _selectedWarehouse;
+    final batchRunning = _snapshot.batchActive;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -782,7 +1046,7 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
                         ),
                         const SizedBox(height: 6),
                         Text(
-                          'Telegram bot logic keyin shu panelga bo‘lib ko‘chadi. Hozir bu UI draft.',
+                          'Telegram client qila oladigan item, warehouse, va batch control shu panelga ulandi.',
                           style: theme.textTheme.bodyMedium?.copyWith(
                             color: scheme.onSurfaceVariant,
                           ),
@@ -829,19 +1093,29 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
                   Expanded(
                     child: _LiveMetricCard(
                       title: 'Selected product',
-                      value: selectedProduct?.code ?? 'None',
-                      caption: selectedProduct?.name ?? 'Product tanlanmagan',
+                      value: selectedProduct?.itemCode ?? 'None',
+                      caption:
+                          selectedProduct?.itemName ?? 'Product tanlanmagan',
                       icon: Icons.inventory_2_outlined,
                     ),
                   ),
                 ],
               ),
+              if (_snapshot.batchActive) ...[
+                const SizedBox(height: 14),
+                _TodoRow(
+                  icon: Icons.playlist_add_check_circle_outlined,
+                  title: 'Active batch',
+                  subtitle:
+                      '${_snapshot.batchItemName.isEmpty ? _snapshot.batchItemCode : _snapshot.batchItemName} • ${_snapshot.batchWarehouse}',
+                ),
+              ],
             ],
           ),
         ),
         const SizedBox(height: 18),
         Text(
-          'Product selection',
+          'Item selection',
           style: theme.textTheme.titleLarge?.copyWith(
             fontWeight: FontWeight.w800,
             letterSpacing: -0.2,
@@ -849,7 +1123,7 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
         ),
         const SizedBox(height: 4),
         Text(
-          'Hozircha lokal UI. Keyin ERP item tanlash shu yerga ulanadi.',
+          'ERP read service orqali itemlar olinadi. Qidiruv 220 ms debounce bilan ishlaydi.',
           style: theme.textTheme.bodyMedium?.copyWith(
             color: scheme.onSurfaceVariant,
           ),
@@ -857,20 +1131,129 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
         const SizedBox(height: 16),
         _SectionCard(
           child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              for (var i = 0; i < _controlProducts.length; i++) ...[
-                _ProductOptionTile(
-                  product: _controlProducts[i],
-                  selected: _selectedProductIndex == i,
-                  onTap: () {
-                    setState(() {
-                      _selectedProductIndex = i;
-                    });
-                  },
+              TextField(
+                controller: _itemSearchController,
+                decoration: const InputDecoration(
+                  labelText: 'Item qidirish',
+                  hintText: 'Masalan: tea, cotton, bag',
+                  prefixIcon: Icon(Icons.search_rounded),
                 ),
-                if (i != _controlProducts.length - 1)
-                  const SizedBox(height: 10),
-              ],
+              ),
+              const SizedBox(height: 12),
+              if (_itemsLoading)
+                const LinearProgressIndicator(minHeight: 2)
+              else if (_itemsError.isNotEmpty)
+                Text(
+                  _itemsError,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: scheme.error,
+                  ),
+                )
+              else if (_items.isEmpty)
+                Text(
+                  'Item topilmadi.',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                  ),
+                )
+              else
+                Column(
+                  children: [
+                    for (var i = 0; i < _items.length; i++) ...[
+                      _ItemOptionTile(
+                        item: _items[i],
+                        selected:
+                            selectedProduct?.itemCode == _items[i].itemCode,
+                        onTap: batchRunning
+                            ? null
+                            : () => _selectItem(_items[i]),
+                      ),
+                      if (i != _items.length - 1) const SizedBox(height: 10),
+                    ],
+                  ],
+                ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 18),
+        Text(
+          'Warehouse selection',
+          style: theme.textTheme.titleLarge?.copyWith(
+            fontWeight: FontWeight.w800,
+            letterSpacing: -0.2,
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          selectedProduct == null
+              ? 'Avval item tanlang.'
+              : 'Tanlangan item uchun omborlar va qoldiq shu yerda chiqadi.',
+          style: theme.textTheme.bodyMedium?.copyWith(
+            color: scheme.onSurfaceVariant,
+          ),
+        ),
+        const SizedBox(height: 16),
+        _SectionCard(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              TextField(
+                controller: _warehouseSearchController,
+                enabled: selectedProduct != null && !batchRunning,
+                decoration: const InputDecoration(
+                  labelText: 'Warehouse qidirish',
+                  hintText: 'Masalan: stores, raw, main',
+                  prefixIcon: Icon(Icons.warehouse_outlined),
+                ),
+              ),
+              const SizedBox(height: 12),
+              if (_warehousesLoading)
+                const LinearProgressIndicator(minHeight: 2)
+              else if (_warehousesError.isNotEmpty)
+                Text(
+                  _warehousesError,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: scheme.error,
+                  ),
+                )
+              else if (selectedProduct == null)
+                Text(
+                  'Item tanlang, keyin warehouse chiqadi.',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                  ),
+                )
+              else if (_warehouses.isEmpty)
+                Text(
+                  'Warehouse topilmadi.',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                  ),
+                )
+              else
+                Column(
+                  children: [
+                    for (var i = 0; i < _warehouses.length; i++) ...[
+                      _WarehouseOptionTile(
+                        warehouse: _warehouses[i],
+                        selected:
+                            selectedWarehouse?.warehouse ==
+                            _warehouses[i].warehouse,
+                        onTap: batchRunning
+                            ? null
+                            : () {
+                                setState(() {
+                                  _selectedWarehouse = _warehouses[i];
+                                });
+                              },
+                      ),
+                      if (i != _warehouses.length - 1)
+                        const SizedBox(height: 10),
+                    ],
+                  ],
+                ),
             ],
           ),
         ),
@@ -884,7 +1267,7 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
         ),
         const SizedBox(height: 4),
         Text(
-          'Faqat kerakli control: batch start/stop, mahsulot, live kg.',
+          'Live stream batch state ni ushlab turadi, actionlar esa yengil HTTP orqali ketadi.',
           style: theme.textTheme.bodyMedium?.copyWith(
             color: scheme.onSurfaceVariant,
           ),
@@ -901,39 +1284,47 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
               const SizedBox(height: 12),
               _TodoRow(
                 icon: Icons.playlist_add_check_circle_outlined,
-                title: 'Chosen product',
+                title: 'Chosen item',
                 subtitle: selectedProduct == null
-                    ? 'Avval mahsulot tanlang'
-                    : '${selectedProduct.code} • ${selectedProduct.name}',
+                    ? 'Avval item tanlang'
+                    : '${selectedProduct.itemCode} • ${selectedProduct.itemName}',
+              ),
+              const SizedBox(height: 12),
+              _TodoRow(
+                icon: Icons.warehouse_outlined,
+                title: 'Chosen warehouse',
+                subtitle: selectedWarehouse == null
+                    ? 'Avval warehouse tanlang'
+                    : selectedWarehouse.label,
               ),
               const SizedBox(height: 18),
               Row(
                 children: [
                   Expanded(
                     child: FilledButton.icon(
-                      onPressed: selectedProduct == null || batchRunning
+                      onPressed:
+                          selectedProduct == null ||
+                              selectedWarehouse == null ||
+                              batchRunning ||
+                              _batchActionLoading
                           ? null
-                          : () {
-                              setState(() {
-                                _batchRequested = true;
-                              });
-                            },
+                          : _startBatch,
                       icon: const Icon(Icons.play_arrow_rounded),
-                      label: const Text('Batch Start'),
+                      label: Text(
+                        _batchActionLoading ? 'Starting...' : 'Batch Start',
+                      ),
                     ),
                   ),
                   const SizedBox(width: 10),
                   Expanded(
                     child: OutlinedButton.icon(
-                      onPressed: batchRunning
-                          ? () {
-                              setState(() {
-                                _batchRequested = false;
-                              });
-                            }
+                      onPressed: batchRunning && !_batchActionLoading
+                          ? _stopBatch
                           : null,
                       icon: const Icon(Icons.stop_rounded),
-                      label: const Text('Batch Stop'),
+                      label: Text(
+                        _batchActionLoading ? 'Stopping...' : 'Batch Stop',
+                      ),
                     ),
                   ),
                 ],
@@ -1131,16 +1522,16 @@ class _LiveMetricCard extends StatelessWidget {
   }
 }
 
-class _ProductOptionTile extends StatelessWidget {
-  const _ProductOptionTile({
-    required this.product,
+class _ItemOptionTile extends StatelessWidget {
+  const _ItemOptionTile({
+    required this.item,
     required this.selected,
     required this.onTap,
   });
 
-  final _ControlProduct product;
+  final MobileItem item;
   final bool selected;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
@@ -1167,7 +1558,7 @@ class _ProductOptionTile extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    product.code,
+                    item.itemCode,
                     style: theme.textTheme.labelLarge?.copyWith(
                       color: selected
                           ? scheme.onSecondaryContainer
@@ -1177,12 +1568,81 @@ class _ProductOptionTile extends StatelessWidget {
                   ),
                   const SizedBox(height: 4),
                   Text(
-                    product.name,
+                    item.itemName,
                     style: theme.textTheme.titleMedium?.copyWith(
                       fontWeight: FontWeight.w700,
                       color: selected
                           ? scheme.onSecondaryContainer
                           : scheme.onSurface,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Icon(
+              selected
+                  ? Icons.radio_button_checked_rounded
+                  : Icons.radio_button_off_rounded,
+              color: selected ? scheme.onSecondaryContainer : scheme.primary,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _WarehouseOptionTile extends StatelessWidget {
+  const _WarehouseOptionTile({
+    required this.warehouse,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final MobileWarehouse warehouse;
+  final bool selected;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(20),
+      child: Container(
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: selected
+              ? scheme.secondaryContainer
+              : scheme.surfaceContainerHighest.withValues(alpha: 0.22),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: selected ? scheme.secondary : scheme.outlineVariant,
+          ),
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    warehouse.warehouse,
+                    style: theme.textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w700,
+                      color: selected
+                          ? scheme.onSecondaryContainer
+                          : scheme.onSurface,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    warehouse.caption,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: selected
+                          ? scheme.onSecondaryContainer
+                          : scheme.onSurfaceVariant,
                     ),
                   ),
                 ],
@@ -1654,6 +2114,10 @@ class MonitorSnapshot {
     required this.serverLabel,
     required this.monitorLabel,
     required this.printerLabel,
+    required this.batchActive,
+    required this.batchItemCode,
+    required this.batchItemName,
+    required this.batchWarehouse,
   });
 
   factory MonitorSnapshot.empty() {
@@ -1669,6 +2133,10 @@ class MonitorSnapshot {
       serverLabel: 'API: idle',
       monitorLabel: 'Scale, Zebra, batch va print request holati',
       printerLabel: 'Printer trace va action holati',
+      batchActive: false,
+      batchItemCode: '',
+      batchItemName: '',
+      batchWarehouse: '',
     );
   }
 
@@ -1690,10 +2158,9 @@ class MonitorSnapshot {
     final zebraAction = _text(zebra['action'], fallback: 'printer state');
 
     final batchActive = batch['active'] == true;
-    final batchItem = _text(
-      batch['item_name'],
-      fallback: _text(batch['item_code']),
-    );
+    final batchItemCode = _text(batch['item_code']);
+    final batchItem = _text(batch['item_name'], fallback: batchItemCode);
+    final batchWarehouse = _text(batch['warehouse']);
 
     final printStatus = _text(printRequest['status'], fallback: 'idle');
     final printerMode = _text(
@@ -1715,6 +2182,31 @@ class MonitorSnapshot {
           : 'API: offline',
       monitorLabel: batchItem.isEmpty ? 'No active batch' : 'Batch: $batchItem',
       printerLabel: 'Print mode: $printerMode',
+      batchActive: batchActive,
+      batchItemCode: batchItemCode,
+      batchItemName: batchItem,
+      batchWarehouse: batchWarehouse,
+    );
+  }
+
+  MonitorSnapshot copyWithBatch(MobileBatchState batch) {
+    final itemName = batch.displayItemName;
+    return MonitorSnapshot(
+      scaleValue: scaleValue,
+      scaleCaption: scaleCaption,
+      zebraValue: zebraValue,
+      zebraCaption: zebraCaption,
+      batchValue: batch.active ? 'Active' : 'Stopped',
+      batchCaption: itemName.isEmpty ? 'Workflow' : itemName,
+      bridgeValue: bridgeValue,
+      bridgeCaption: bridgeCaption,
+      serverLabel: serverLabel,
+      monitorLabel: itemName.isEmpty ? 'No active batch' : 'Batch: $itemName',
+      printerLabel: printerLabel,
+      batchActive: batch.active,
+      batchItemCode: batch.itemCode,
+      batchItemName: itemName,
+      batchWarehouse: batch.warehouse,
     );
   }
 
@@ -1729,21 +2221,71 @@ class MonitorSnapshot {
   final String serverLabel;
   final String monitorLabel;
   final String printerLabel;
+  final bool batchActive;
+  final String batchItemCode;
+  final String batchItemName;
+  final String batchWarehouse;
 }
 
-class _ControlProduct {
-  const _ControlProduct({required this.code, required this.name});
+class MobileItem {
+  const MobileItem({required this.itemCode, required this.itemName});
 
-  final String code;
-  final String name;
+  factory MobileItem.fromJson(Map<String, dynamic> json) {
+    final itemCode = _text(json['item_code'], fallback: _text(json['name']));
+    final itemName = _text(json['item_name'], fallback: itemCode);
+    return MobileItem(itemCode: itemCode, itemName: itemName);
+  }
+
+  final String itemCode;
+  final String itemName;
 }
 
-const List<_ControlProduct> _controlProducts = [
-  _ControlProduct(code: 'ITEM-001', name: 'Green Tea'),
-  _ControlProduct(code: 'ITEM-002', name: 'Black Sesame'),
-  _ControlProduct(code: 'ITEM-003', name: 'Cotton Roll'),
-  _ControlProduct(code: 'ITEM-004', name: 'Poly Bag'),
-];
+class MobileWarehouse {
+  const MobileWarehouse({required this.warehouse, this.actualQty});
+
+  factory MobileWarehouse.fromJson(Map<String, dynamic> json) {
+    return MobileWarehouse(
+      warehouse: _text(json['warehouse']),
+      actualQty: (json['actual_qty'] as num?)?.toDouble(),
+    );
+  }
+
+  final String warehouse;
+  final double? actualQty;
+
+  String get caption => actualQty == null
+      ? 'Qoldiq mavjud'
+      : 'Qoldiq: ${actualQty!.toStringAsFixed(3)}';
+
+  String get label => actualQty == null
+      ? warehouse
+      : '$warehouse • ${actualQty!.toStringAsFixed(3)}';
+}
+
+class MobileBatchState {
+  const MobileBatchState({
+    required this.active,
+    required this.itemCode,
+    required this.itemName,
+    required this.warehouse,
+  });
+
+  factory MobileBatchState.fromJson(Map<String, dynamic> json) {
+    return MobileBatchState(
+      active: json['active'] == true,
+      itemCode: _text(json['item_code']),
+      itemName: _text(json['item_name']),
+      warehouse: _text(json['warehouse']),
+    );
+  }
+
+  final bool active;
+  final String itemCode;
+  final String itemName;
+  final String warehouse;
+
+  String get displayItemName => itemName.isEmpty ? itemCode : itemName;
+}
 
 class DiscoveryResult {
   const DiscoveryResult({required this.servers, required this.candidateCount});
