@@ -11,16 +11,19 @@ import 'network_candidates_stub.dart'
     if (dart.library.io) 'network_candidates_io.dart'
     as network_candidates;
 
-const _defaultApiBaseUrl = String.fromEnvironment(
-  'API_BASE_URL',
-  defaultValue: 'http://127.0.0.1:8081',
-);
 const _defaultApiPort = 8081;
 const _discoveryPort = 18081;
 const _fastProbeTimeout = Duration(milliseconds: 180);
 const _manualProbeTimeout = Duration(seconds: 2);
 const _udpDiscoveryTimeout = Duration(milliseconds: 450);
+const _fallbackProbeTimeout = Duration(milliseconds: 240);
+const _fallbackProbeConcurrency = 24;
 const _lastServerKey = 'last_server_base_url';
+const _defaultWifiServerAddress = 'http://gscale.local:8081';
+const _configuredApiBaseUrl = String.fromEnvironment(
+  'API_BASE_URL',
+  defaultValue: _defaultWifiServerAddress,
+);
 const _m3Surface = Color(0xFFF4EEFF);
 const _m3Container = Color(0xFFDCD6F7);
 const _m3Accent = Color(0xFFA6B1E1);
@@ -47,14 +50,19 @@ bool get previewEnabled {
 }
 
 void main() {
-  runApp(
-    DevicePreview(
-      enabled: previewEnabled,
-      isToolbarVisible: true,
-      tools: const [...DevicePreview.defaultTools],
-      builder: (context) => const GScaleMobileApp(),
-    ),
-  );
+  WidgetsFlutterBinding.ensureInitialized();
+  if (previewEnabled) {
+    runApp(
+      DevicePreview(
+        enabled: true,
+        isToolbarVisible: true,
+        tools: const [...DevicePreview.defaultTools],
+        builder: (context) => const GScaleMobileApp(),
+      ),
+    );
+    return;
+  }
+  runApp(const GScaleMobileApp());
 }
 
 class GScaleMobileApp extends StatefulWidget {
@@ -161,9 +169,9 @@ ThemeData buildAppTheme(Brightness brightness) {
       color: scheme.surfaceContainerLow,
       margin: EdgeInsets.zero,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(28),
+        borderRadius: BorderRadius.circular(20),
         side: BorderSide(
-          color: scheme.outlineVariant.withValues(alpha: isDark ? 0.45 : 0.8),
+          color: scheme.outlineVariant.withValues(alpha: isDark ? 0.35 : 0.65),
         ),
       ),
     ),
@@ -204,15 +212,20 @@ class _ServerPickerPageState extends State<ServerPickerPage> {
 
   bool _scanning = false;
   DiscoveryResult? _result;
+  Timer? _refreshTimer;
 
   @override
   void initState() {
     super.initState();
     unawaited(_scan());
+    _refreshTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      unawaited(_scan());
+    });
   }
 
   @override
   void dispose() {
+    _refreshTimer?.cancel();
     _client.close();
     super.dispose();
   }
@@ -226,19 +239,36 @@ class _ServerPickerPageState extends State<ServerPickerPage> {
       _scanning = true;
     });
 
-    final preferredEndpoint = await loadLastUsedServer();
-    final result = await discoverServers(
-      _client,
-      preferredEndpoint: preferredEndpoint,
-    );
-    if (!mounted) {
-      return;
-    }
+    try {
+      final preferredEndpoint = await loadLastUsedServer();
+      final result = await discoverServers(
+        _client,
+        preferredEndpoint: preferredEndpoint,
+      );
+      if (!mounted) {
+        return;
+      }
 
-    setState(() {
-      _result = result;
-      _scanning = false;
-    });
+      setState(() {
+        _result = result;
+      });
+    } catch (_) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _result ??= const DiscoveryResult(
+          servers: <DiscoveredServer>[],
+          candidateCount: 0,
+        );
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _scanning = false;
+        });
+      }
+    }
   }
 
   Future<void> _openManualEntrySheet() async {
@@ -327,13 +357,18 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
   List<MobileWarehouse> _warehouses = const [];
   MobileItem? _selectedItem;
   MobileWarehouse? _selectedWarehouse;
+  Timer? _pingTimer;
 
   @override
   void initState() {
     super.initState();
     _itemSearchController.addListener(_scheduleItemSearch);
     _warehouseSearchController.addListener(_scheduleWarehouseSearch);
+    _snapshot = MonitorSnapshot.empty().copyWithLatency(
+      widget.server.latencyMs,
+    );
     _startLiveStream();
+    _startPingLoop();
     unawaited(_loadItems());
   }
 
@@ -341,6 +376,7 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
   void dispose() {
     _itemSearchDebounce?.cancel();
     _warehouseSearchDebounce?.cancel();
+    _pingTimer?.cancel();
     _itemSearchController.dispose();
     _warehouseSearchController.dispose();
     _stopLiveStream();
@@ -354,10 +390,45 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
     unawaited(_runLiveStream(generation));
   }
 
+  void _startPingLoop() {
+    _pingTimer?.cancel();
+    _pingTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      unawaited(_refreshLatency());
+    });
+    unawaited(_refreshLatency());
+  }
+
   void _stopLiveStream() {
     _streamGeneration++;
     unawaited(_streamSubscription?.cancel());
     _streamSubscription = null;
+  }
+
+  Future<void> _refreshLatency() async {
+    if (!mounted) {
+      return;
+    }
+
+    final server = widget.server;
+    final stopwatch = Stopwatch()..start();
+    try {
+      final response = await _client
+          .get(Uri.parse('${server.endpoint.baseUrl}/healthz'))
+          .timeout(const Duration(seconds: 2));
+      if (response.statusCode < 200 || response.statusCode > 299) {
+        return;
+      }
+      stopwatch.stop();
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _snapshot = _snapshot.copyWithLatency(stopwatch.elapsedMilliseconds);
+        _connected = true;
+      });
+    } catch (_) {
+      return;
+    }
   }
 
   Future<void> _runLiveStream(int generation) async {
@@ -520,7 +591,7 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
   }
 
   void _applySnapshot(MonitorSnapshot snapshot) {
-    _snapshot = snapshot;
+    _snapshot = snapshot.copyWithLatency(_snapshot.latencyMs);
     if (snapshot.batchActive) {
       if (snapshot.batchItemCode.isNotEmpty) {
         _selectedItem = MobileItem(
@@ -834,32 +905,55 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _ServerHeaderCard(
-          connected: _connected,
-          statusText: _statusText,
-          displayName: server.handshake.displayName,
-          endpoint: server.endpoint.baseUrl,
-          role: server.handshake.role,
-          serverRef: server.handshake.serverRef,
-          latencyMs: server.latencyMs,
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    server.handshake.displayName,
+                    style: theme.textTheme.headlineSmall?.copyWith(
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: -0.4,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    server.endpoint.baseUrl,
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            Chip(
+              avatar: Icon(
+                _connected
+                    ? Icons.radio_button_checked_rounded
+                    : Icons.radio_button_off_rounded,
+                size: 18,
+              ),
+              label: Text(_connected ? 'Connected' : 'Offline'),
+            ),
+          ],
         ),
-        const SizedBox(height: 18),
-        Text(
-          'Server health',
-          style: theme.textTheme.titleLarge?.copyWith(
-            fontWeight: FontWeight.w800,
-            letterSpacing: -0.2,
-          ),
+        const SizedBox(height: 12),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            Chip(label: Text(server.handshake.role.toUpperCase())),
+            Chip(label: Text(server.handshake.serverRef)),
+            if (server.latencyMs > 0)
+              Chip(label: Text('${server.latencyMs} ms')),
+          ],
         ),
-        const SizedBox(height: 4),
-        Text(
-          _connected
-              ? 'Server live stream va handshake holati shu yerda.'
-              : 'Server offline yoki stream uzilgan. Refresh bilan qayta tekshiriladi.',
-          style: theme.textTheme.bodyMedium?.copyWith(
-            color: scheme.onSurfaceVariant,
-          ),
-        ),
+        const SizedBox(height: 22),
+        _SectionLabel(title: 'Server health', subtitle: ''),
         if (_errorText.isNotEmpty) ...[
           const SizedBox(height: 12),
           Text(
@@ -867,51 +961,42 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
             style: theme.textTheme.bodySmall?.copyWith(color: scheme.error),
           ),
         ],
-        const SizedBox(height: 16),
-        _SectionCard(
-          child: Column(
-            children: [
-              _TodoRow(
-                icon: Icons.wifi_tethering,
-                title: 'Server',
-                subtitle: _connected
-                    ? _snapshot.serverLabel
-                    : server.endpoint.baseUrl,
-              ),
-              const SizedBox(height: 12),
-              _TodoRow(
-                icon: Icons.monitor_heart_outlined,
-                title: 'Monitor stream',
-                subtitle: _connected
-                    ? 'Live snapshot qabul qilinyapti'
-                    : 'Live stream ulanmagan',
-              ),
-              const SizedBox(height: 12),
-              _TodoRow(
-                icon: Icons.badge_outlined,
-                title: 'Profile',
-                subtitle:
-                    '${server.handshake.displayName} • ${server.handshake.role.toUpperCase()}',
-              ),
-            ],
-          ),
+        const SizedBox(height: 14),
+        _MiniIconRow(
+          icon: Icons.wifi_tethering,
+          text: _connected ? _snapshot.serverLabel : server.endpoint.baseUrl,
         ),
-        const SizedBox(height: 18),
+        const SizedBox(height: 14),
+        Divider(color: scheme.outlineVariant.withValues(alpha: 0.8)),
+        const SizedBox(height: 14),
+        _MiniIconRow(
+          icon: Icons.monitor_heart_outlined,
+          text: _connected
+              ? 'Live snapshot qabul qilinyapti'
+              : 'Live stream ulanmagan',
+        ),
+        const SizedBox(height: 14),
+        Divider(color: scheme.outlineVariant.withValues(alpha: 0.8)),
+        const SizedBox(height: 14),
+        _MiniIconRow(
+          icon: Icons.badge_outlined,
+          text:
+              '${server.handshake.displayName} • ${server.handshake.role.toUpperCase()}',
+        ),
+        const SizedBox(height: 24),
         Row(
           children: [
             Expanded(
-              child: FilledButton.icon(
+              child: FilledButton(
                 onPressed: _manualLoading ? null : () => _refresh(manual: true),
-                icon: const Icon(Icons.refresh_rounded),
-                label: Text(_manualLoading ? 'Refreshing...' : 'Refresh'),
+                child: const Icon(Icons.refresh_rounded),
               ),
             ),
             const SizedBox(width: 10),
             Expanded(
-              child: OutlinedButton.icon(
+              child: OutlinedButton(
                 onPressed: widget.onChangeServer,
-                icon: const Icon(Icons.dns_rounded),
-                label: const Text('Servers'),
+                child: const Icon(Icons.dns_rounded),
               ),
             ),
           ],
@@ -929,87 +1014,68 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _SectionCard(
-          child: Row(
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Line overview',
-                      style: theme.textTheme.titleLarge?.copyWith(
-                        fontWeight: FontWeight.w800,
-                        letterSpacing: -0.2,
-                      ),
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Line overview',
+                    style: theme.textTheme.headlineSmall?.copyWith(
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: -0.4,
                     ),
-                    const SizedBox(height: 6),
-                    Text(
-                      _connected
-                          ? 'Tanlangan serverdan live line holati olindi.'
-                          : 'Line holati hozir offline.',
-                      style: theme.textTheme.bodyMedium?.copyWith(
-                        color: scheme.onSurfaceVariant,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 12),
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 8,
-                ),
-                decoration: BoxDecoration(
-                  color: _connected
-                      ? scheme.secondaryContainer
-                      : scheme.surfaceContainerHighest,
-                  borderRadius: BorderRadius.circular(999),
-                ),
-                child: Text(
-                  _connected ? 'LIVE' : 'OFFLINE',
-                  style: theme.textTheme.labelLarge?.copyWith(
-                    color: _connected
-                        ? scheme.onSecondaryContainer
-                        : scheme.onSurfaceVariant,
-                    fontWeight: FontWeight.w800,
                   ),
-                ),
+                  const SizedBox(height: 6),
+                  Text(
+                    _connected
+                        ? 'Tanlangan serverdan live line holati olindi.'
+                        : 'Line holati hozir offline.',
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
               ),
-            ],
-          ),
+            ),
+            const SizedBox(width: 12),
+            Chip(
+              avatar: Icon(
+                _connected
+                    ? Icons.radio_button_checked_rounded
+                    : Icons.radio_button_off_rounded,
+                size: 18,
+              ),
+              label: Text(_connected ? 'LIVE' : 'OFFLINE'),
+            ),
+          ],
         ),
         const SizedBox(height: 18),
-        _SectionCard(child: _StatusGrid(snapshot: _snapshot)),
-        const SizedBox(height: 18),
-        _SectionCard(
-          child: Column(
-            children: [
-              _TodoRow(
-                icon: Icons.scale_outlined,
-                title: 'Scale + batch',
-                subtitle: _connected
-                    ? _snapshot.monitorLabel
-                    : 'Scale, Zebra, batch va print request holati',
-              ),
-              const SizedBox(height: 12),
-              _TodoRow(
-                icon: Icons.print_outlined,
-                title: 'Printer trace',
-                subtitle: _connected
-                    ? _snapshot.printerLabel
-                    : 'Printer trace va action holati',
-              ),
-              const SizedBox(height: 12),
-              _TodoRow(
-                icon: Icons.link_outlined,
-                title: 'Current endpoint',
-                subtitle: server.endpoint.baseUrl,
-              ),
-            ],
-          ),
+        _StatusGrid(snapshot: _snapshot),
+        const SizedBox(height: 26),
+        _SectionLabel(title: 'Line details', subtitle: ''),
+        const SizedBox(height: 12),
+        _MiniIconRow(
+          icon: Icons.scale_outlined,
+          text: _connected
+              ? _snapshot.monitorLabel
+              : 'Scale, Zebra, batch va print request holati',
         ),
+        const SizedBox(height: 16),
+        Divider(color: scheme.outlineVariant.withValues(alpha: 0.8)),
+        const SizedBox(height: 16),
+        _MiniIconRow(
+          icon: Icons.print_outlined,
+          text: _connected
+              ? _snapshot.printerLabel
+              : 'Printer trace va action holati',
+        ),
+        const SizedBox(height: 16),
+        Divider(color: scheme.outlineVariant.withValues(alpha: 0.8)),
+        const SizedBox(height: 16),
+        _MiniIconRow(icon: Icons.link_outlined, text: server.endpoint.baseUrl),
       ],
     );
   }
@@ -1027,310 +1093,207 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _SectionCard(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Control panel',
+                    style: theme.textTheme.headlineSmall?.copyWith(
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: -0.4,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            Chip(
+              avatar: Icon(
+                batchRunning
+                    ? Icons.play_circle_outline_rounded
+                    : Icons.pause_circle_outline_rounded,
+                size: 18,
+              ),
+              label: Text(batchRunning ? 'BATCH ON' : 'BATCH OFF'),
+            ),
+          ],
+        ),
+        const SizedBox(height: 20),
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: _MetricSummary(
+                title: 'Live kg',
+                value: _snapshot.scaleValue,
+                caption: _snapshot.scaleCaption,
+                icon: Icons.scale_outlined,
+              ),
+            ),
+            const SizedBox(width: 20),
+            Expanded(
+              child: _MetricSummary(
+                title: 'Selected product',
+                value: selectedProduct?.itemCode ?? 'None',
+                caption: selectedProduct?.itemName ?? 'Product tanlanmagan',
+                icon: Icons.inventory_2_outlined,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        _MiniIconRow(
+          icon: Icons.speed_outlined,
+          text: _snapshot.latencyMs > 0 ? '${_snapshot.latencyMs} ms' : '—',
+        ),
+        if (_snapshot.batchActive) ...[
+          const SizedBox(height: 12),
+          _MiniIconRow(
+            icon: Icons.playlist_add_check_circle_outlined,
+            text:
+                '${_snapshot.batchItemName.isEmpty ? _snapshot.batchItemCode : _snapshot.batchItemName} • ${_snapshot.batchWarehouse}',
+          ),
+        ],
+        const SizedBox(height: 28),
+        _SectionLabel(title: 'Item selection', subtitle: ''),
+        const SizedBox(height: 8),
+        TextField(
+          controller: _itemSearchController,
+          decoration: const InputDecoration(
+            labelText: 'Item qidirish',
+            hintText: 'Masalan: tea, cotton, bag',
+            prefixIcon: Icon(Icons.search_rounded),
+          ),
+        ),
+        const SizedBox(height: 10),
+        if (_itemsLoading)
+          const LinearProgressIndicator(minHeight: 2)
+        else if (_itemsError.isNotEmpty)
+          Text(
+            _itemsError,
+            style: theme.textTheme.bodySmall?.copyWith(color: scheme.error),
+          )
+        else if (_items.isEmpty)
+          Text(
+            'Item topilmadi.',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: scheme.onSurfaceVariant,
+            ),
+          )
+        else
+          Column(
             children: [
-              Row(
-                children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Control panel',
-                          style: theme.textTheme.titleLarge?.copyWith(
-                            fontWeight: FontWeight.w800,
-                            letterSpacing: -0.2,
-                          ),
-                        ),
-                        const SizedBox(height: 6),
-                        Text(
-                          'Telegram client qila oladigan item, warehouse, va batch control shu panelga ulandi.',
-                          style: theme.textTheme.bodyMedium?.copyWith(
-                            color: scheme.onSurfaceVariant,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 8,
-                    ),
-                    decoration: BoxDecoration(
-                      color: batchRunning
-                          ? scheme.secondaryContainer
-                          : scheme.surfaceContainerHighest,
-                      borderRadius: BorderRadius.circular(999),
-                    ),
-                    child: Text(
-                      batchRunning ? 'BATCH ON' : 'BATCH OFF',
-                      style: theme.textTheme.labelLarge?.copyWith(
-                        color: batchRunning
-                            ? scheme.onSecondaryContainer
-                            : scheme.onSurfaceVariant,
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 18),
-              Row(
-                children: [
-                  Expanded(
-                    child: _LiveMetricCard(
-                      title: 'Live kg',
-                      value: _snapshot.scaleValue,
-                      caption: _snapshot.scaleCaption,
-                      icon: Icons.scale_outlined,
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: _LiveMetricCard(
-                      title: 'Selected product',
-                      value: selectedProduct?.itemCode ?? 'None',
-                      caption:
-                          selectedProduct?.itemName ?? 'Product tanlanmagan',
-                      icon: Icons.inventory_2_outlined,
-                    ),
-                  ),
-                ],
-              ),
-              if (_snapshot.batchActive) ...[
-                const SizedBox(height: 14),
-                _TodoRow(
-                  icon: Icons.playlist_add_check_circle_outlined,
-                  title: 'Active batch',
-                  subtitle:
-                      '${_snapshot.batchItemName.isEmpty ? _snapshot.batchItemCode : _snapshot.batchItemName} • ${_snapshot.batchWarehouse}',
+              for (var i = 0; i < _items.length; i++) ...[
+                _ItemOptionTile(
+                  item: _items[i],
+                  selected: selectedProduct?.itemCode == _items[i].itemCode,
+                  onTap: batchRunning ? null : () => _selectItem(_items[i]),
                 ),
+                if (i != _items.length - 1)
+                  Divider(
+                    height: 1,
+                    indent: 52,
+                    endIndent: 0,
+                    color: scheme.outlineVariant.withValues(alpha: 0.8),
+                  ),
               ],
             ],
           ),
-        ),
-        const SizedBox(height: 18),
-        Text(
-          'Item selection',
-          style: theme.textTheme.titleLarge?.copyWith(
-            fontWeight: FontWeight.w800,
-            letterSpacing: -0.2,
+        const SizedBox(height: 28),
+        _SectionLabel(title: 'Warehouse selection', subtitle: ''),
+        const SizedBox(height: 8),
+        TextField(
+          controller: _warehouseSearchController,
+          enabled: selectedProduct != null && !batchRunning,
+          decoration: const InputDecoration(
+            labelText: 'Warehouse qidirish',
+            hintText: 'Masalan: stores, raw, main',
+            prefixIcon: Icon(Icons.warehouse_outlined),
           ),
         ),
-        const SizedBox(height: 4),
-        Text(
-          'ERP read service orqali itemlar olinadi. Qidiruv 220 ms debounce bilan ishlaydi.',
-          style: theme.textTheme.bodyMedium?.copyWith(
-            color: scheme.onSurfaceVariant,
-          ),
-        ),
-        const SizedBox(height: 16),
-        _SectionCard(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+        const SizedBox(height: 10),
+        if (_warehousesLoading)
+          const LinearProgressIndicator(minHeight: 2)
+        else if (_warehousesError.isNotEmpty)
+          Text(
+            _warehousesError,
+            style: theme.textTheme.bodySmall?.copyWith(color: scheme.error),
+          )
+        else if (selectedProduct == null)
+          Text(
+            'Item tanlang, keyin warehouse chiqadi.',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: scheme.onSurfaceVariant,
+            ),
+          )
+        else if (_warehouses.isEmpty)
+          Text(
+            'Warehouse topilmadi.',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: scheme.onSurfaceVariant,
+            ),
+          )
+        else
+          Column(
             children: [
-              TextField(
-                controller: _itemSearchController,
-                decoration: const InputDecoration(
-                  labelText: 'Item qidirish',
-                  hintText: 'Masalan: tea, cotton, bag',
-                  prefixIcon: Icon(Icons.search_rounded),
+              for (var i = 0; i < _warehouses.length; i++) ...[
+                _WarehouseOptionTile(
+                  warehouse: _warehouses[i],
+                  selected:
+                      selectedWarehouse?.warehouse == _warehouses[i].warehouse,
+                  onTap: batchRunning
+                      ? null
+                      : () {
+                          setState(() {
+                            _selectedWarehouse = _warehouses[i];
+                          });
+                        },
                 ),
-              ),
-              const SizedBox(height: 12),
-              if (_itemsLoading)
-                const LinearProgressIndicator(minHeight: 2)
-              else if (_itemsError.isNotEmpty)
-                Text(
-                  _itemsError,
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: scheme.error,
+                if (i != _warehouses.length - 1)
+                  Divider(
+                    height: 1,
+                    indent: 52,
+                    endIndent: 0,
+                    color: scheme.outlineVariant.withValues(alpha: 0.8),
                   ),
-                )
-              else if (_items.isEmpty)
-                Text(
-                  'Item topilmadi.',
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: scheme.onSurfaceVariant,
-                  ),
-                )
-              else
-                Column(
-                  children: [
-                    for (var i = 0; i < _items.length; i++) ...[
-                      _ItemOptionTile(
-                        item: _items[i],
-                        selected:
-                            selectedProduct?.itemCode == _items[i].itemCode,
-                        onTap: batchRunning
-                            ? null
-                            : () => _selectItem(_items[i]),
-                      ),
-                      if (i != _items.length - 1) const SizedBox(height: 10),
-                    ],
-                  ],
-                ),
+              ],
             ],
           ),
-        ),
-        const SizedBox(height: 18),
-        Text(
-          'Warehouse selection',
-          style: theme.textTheme.titleLarge?.copyWith(
-            fontWeight: FontWeight.w800,
-            letterSpacing: -0.2,
-          ),
-        ),
-        const SizedBox(height: 4),
-        Text(
-          selectedProduct == null
-              ? 'Avval item tanlang.'
-              : 'Tanlangan item uchun omborlar va qoldiq shu yerda chiqadi.',
-          style: theme.textTheme.bodyMedium?.copyWith(
-            color: scheme.onSurfaceVariant,
-          ),
-        ),
-        const SizedBox(height: 16),
-        _SectionCard(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              TextField(
-                controller: _warehouseSearchController,
-                enabled: selectedProduct != null && !batchRunning,
-                decoration: const InputDecoration(
-                  labelText: 'Warehouse qidirish',
-                  hintText: 'Masalan: stores, raw, main',
-                  prefixIcon: Icon(Icons.warehouse_outlined),
+        const SizedBox(height: 28),
+        _SectionLabel(title: 'Batch actions', subtitle: ''),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            Expanded(
+              child: FilledButton.icon(
+                onPressed:
+                    selectedProduct == null ||
+                        selectedWarehouse == null ||
+                        batchRunning ||
+                        _batchActionLoading
+                    ? null
+                    : _startBatch,
+                icon: const Icon(Icons.play_arrow_rounded),
+                label: Text(
+                  _batchActionLoading ? 'Starting...' : 'Batch Start',
                 ),
               ),
-              const SizedBox(height: 12),
-              if (_warehousesLoading)
-                const LinearProgressIndicator(minHeight: 2)
-              else if (_warehousesError.isNotEmpty)
-                Text(
-                  _warehousesError,
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: scheme.error,
-                  ),
-                )
-              else if (selectedProduct == null)
-                Text(
-                  'Item tanlang, keyin warehouse chiqadi.',
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: scheme.onSurfaceVariant,
-                  ),
-                )
-              else if (_warehouses.isEmpty)
-                Text(
-                  'Warehouse topilmadi.',
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: scheme.onSurfaceVariant,
-                  ),
-                )
-              else
-                Column(
-                  children: [
-                    for (var i = 0; i < _warehouses.length; i++) ...[
-                      _WarehouseOptionTile(
-                        warehouse: _warehouses[i],
-                        selected:
-                            selectedWarehouse?.warehouse ==
-                            _warehouses[i].warehouse,
-                        onTap: batchRunning
-                            ? null
-                            : () {
-                                setState(() {
-                                  _selectedWarehouse = _warehouses[i];
-                                });
-                              },
-                      ),
-                      if (i != _warehouses.length - 1)
-                        const SizedBox(height: 10),
-                    ],
-                  ],
-                ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 18),
-        Text(
-          'Batch actions',
-          style: theme.textTheme.titleLarge?.copyWith(
-            fontWeight: FontWeight.w800,
-            letterSpacing: -0.2,
-          ),
-        ),
-        const SizedBox(height: 4),
-        Text(
-          'Live stream batch state ni ushlab turadi, actionlar esa yengil HTTP orqali ketadi.',
-          style: theme.textTheme.bodyMedium?.copyWith(
-            color: scheme.onSurfaceVariant,
-          ),
-        ),
-        const SizedBox(height: 16),
-        _SectionCard(
-          child: Column(
-            children: [
-              _TodoRow(
-                icon: Icons.hub_outlined,
-                title: 'Current server',
-                subtitle: server.endpoint.baseUrl,
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: batchRunning && !_batchActionLoading
+                    ? _stopBatch
+                    : null,
+                icon: const Icon(Icons.stop_rounded),
+                label: Text(_batchActionLoading ? 'Stopping...' : 'Batch Stop'),
               ),
-              const SizedBox(height: 12),
-              _TodoRow(
-                icon: Icons.playlist_add_check_circle_outlined,
-                title: 'Chosen item',
-                subtitle: selectedProduct == null
-                    ? 'Avval item tanlang'
-                    : '${selectedProduct.itemCode} • ${selectedProduct.itemName}',
-              ),
-              const SizedBox(height: 12),
-              _TodoRow(
-                icon: Icons.warehouse_outlined,
-                title: 'Chosen warehouse',
-                subtitle: selectedWarehouse == null
-                    ? 'Avval warehouse tanlang'
-                    : selectedWarehouse.label,
-              ),
-              const SizedBox(height: 18),
-              Row(
-                children: [
-                  Expanded(
-                    child: FilledButton.icon(
-                      onPressed:
-                          selectedProduct == null ||
-                              selectedWarehouse == null ||
-                              batchRunning ||
-                              _batchActionLoading
-                          ? null
-                          : _startBatch,
-                      icon: const Icon(Icons.play_arrow_rounded),
-                      label: Text(
-                        _batchActionLoading ? 'Starting...' : 'Batch Start',
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      onPressed: batchRunning && !_batchActionLoading
-                          ? _stopBatch
-                          : null,
-                      icon: const Icon(Icons.stop_rounded),
-                      label: Text(
-                        _batchActionLoading ? 'Stopping...' : 'Batch Stop',
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
+            ),
+          ],
         ),
       ],
     );
@@ -1347,6 +1310,127 @@ class _DashboardScrollView extends StatelessWidget {
     return ListView(
       padding: const EdgeInsets.fromLTRB(18, 8, 18, 24),
       children: [child],
+    );
+  }
+}
+
+class _SectionLabel extends StatelessWidget {
+  const _SectionLabel({required this.title, required this.subtitle});
+
+  final String title;
+  final String subtitle;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          title,
+          style: theme.textTheme.titleLarge?.copyWith(
+            fontWeight: FontWeight.w800,
+            letterSpacing: -0.2,
+          ),
+        ),
+        if (subtitle.trim().isNotEmpty) ...[
+          const SizedBox(height: 4),
+          Text(
+            subtitle,
+            style: theme.textTheme.bodyMedium?.copyWith(
+              color: scheme.onSurfaceVariant,
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+class _MetricSummary extends StatelessWidget {
+  const _MetricSummary({
+    required this.title,
+    required this.value,
+    required this.caption,
+    required this.icon,
+  });
+
+  final String title;
+  final String value;
+  final String caption;
+  final IconData icon;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(icon, color: scheme.primary, size: 20),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                title,
+                style: theme.textTheme.labelLarge?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                value,
+                style: theme.textTheme.headlineSmall?.copyWith(
+                  fontWeight: FontWeight.w800,
+                  height: 1.0,
+                ),
+              ),
+              const SizedBox(height: 3),
+              Text(
+                caption,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _MiniIconRow extends StatelessWidget {
+  const _MiniIconRow({required this.icon, required this.text});
+
+  final IconData icon;
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(icon, color: scheme.primary, size: 20),
+        const SizedBox(width: 14),
+        Expanded(
+          child: Text(
+            text,
+            style: theme.textTheme.bodyMedium?.copyWith(
+              color: scheme.onSurface,
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -1537,56 +1621,39 @@ class _ItemOptionTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(20),
-      child: Container(
-        padding: const EdgeInsets.all(14),
-        decoration: BoxDecoration(
-          color: selected
-              ? scheme.secondaryContainer
-              : scheme.surfaceContainerHighest.withValues(alpha: 0.22),
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(
-            color: selected ? scheme.secondary : scheme.outlineVariant,
+    return Material(
+      color: selected
+          ? scheme.secondaryContainer.withValues(alpha: 0.45)
+          : Colors.transparent,
+      borderRadius: BorderRadius.circular(16),
+      child: ListTile(
+        onTap: onTap,
+        contentPadding: const EdgeInsets.symmetric(horizontal: 0, vertical: 2),
+        leading: Icon(
+          Icons.inventory_2_outlined,
+          color: selected ? scheme.onSecondaryContainer : scheme.primary,
+        ),
+        title: Text(
+          item.itemCode,
+          style: theme.textTheme.bodyLarge?.copyWith(
+            fontWeight: FontWeight.w700,
+            color: selected ? scheme.onSecondaryContainer : scheme.onSurface,
           ),
         ),
-        child: Row(
-          children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    item.itemCode,
-                    style: theme.textTheme.labelLarge?.copyWith(
-                      color: selected
-                          ? scheme.onSecondaryContainer
-                          : scheme.onSurfaceVariant,
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    item.itemName,
-                    style: theme.textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w700,
-                      color: selected
-                          ? scheme.onSecondaryContainer
-                          : scheme.onSurface,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            Icon(
-              selected
-                  ? Icons.radio_button_checked_rounded
-                  : Icons.radio_button_off_rounded,
-              color: selected ? scheme.onSecondaryContainer : scheme.primary,
-            ),
-          ],
+        subtitle: Text(
+          item.itemName,
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: selected
+                ? scheme.onSecondaryContainer
+                : scheme.onSurfaceVariant,
+          ),
         ),
+        trailing: selected
+            ? Icon(
+                Icons.check_circle_rounded,
+                color: scheme.onSecondaryContainer,
+              )
+            : Icon(Icons.circle_outlined, color: scheme.outline),
       ),
     );
   }
@@ -1607,55 +1674,39 @@ class _WarehouseOptionTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(20),
-      child: Container(
-        padding: const EdgeInsets.all(14),
-        decoration: BoxDecoration(
-          color: selected
-              ? scheme.secondaryContainer
-              : scheme.surfaceContainerHighest.withValues(alpha: 0.22),
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(
-            color: selected ? scheme.secondary : scheme.outlineVariant,
+    return Material(
+      color: selected
+          ? scheme.secondaryContainer.withValues(alpha: 0.45)
+          : Colors.transparent,
+      borderRadius: BorderRadius.circular(16),
+      child: ListTile(
+        onTap: onTap,
+        contentPadding: const EdgeInsets.symmetric(horizontal: 0, vertical: 2),
+        leading: Icon(
+          Icons.warehouse_outlined,
+          color: selected ? scheme.onSecondaryContainer : scheme.primary,
+        ),
+        title: Text(
+          warehouse.warehouse,
+          style: theme.textTheme.bodyLarge?.copyWith(
+            fontWeight: FontWeight.w700,
+            color: selected ? scheme.onSecondaryContainer : scheme.onSurface,
           ),
         ),
-        child: Row(
-          children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    warehouse.warehouse,
-                    style: theme.textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w700,
-                      color: selected
-                          ? scheme.onSecondaryContainer
-                          : scheme.onSurface,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    warehouse.caption,
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: selected
-                          ? scheme.onSecondaryContainer
-                          : scheme.onSurfaceVariant,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            Icon(
-              selected
-                  ? Icons.radio_button_checked_rounded
-                  : Icons.radio_button_off_rounded,
-              color: selected ? scheme.onSecondaryContainer : scheme.primary,
-            ),
-          ],
+        subtitle: Text(
+          warehouse.caption,
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: selected
+                ? scheme.onSecondaryContainer
+                : scheme.onSurfaceVariant,
+          ),
         ),
+        trailing: selected
+            ? Icon(
+                Icons.check_circle_rounded,
+                color: scheme.onSecondaryContainer,
+              )
+            : Icon(Icons.circle_outlined, color: scheme.outline),
       ),
     );
   }
@@ -1832,7 +1883,9 @@ class _ManualServerSheetState extends State<ManualServerSheet> {
   @override
   void initState() {
     super.initState();
-    _controller = TextEditingController(text: _defaultApiBaseUrl);
+    _controller = TextEditingController(
+      text: _sanitizeManualServerAddress(_configuredApiBaseUrl),
+    );
   }
 
   @override
@@ -1856,6 +1909,13 @@ class _ManualServerSheetState extends State<ManualServerSheet> {
       setState(() {
         _checking = false;
         _errorText = 'Address format is invalid';
+      });
+      return;
+    }
+    if (_shouldSkipDiscoveryHost(endpoint.host)) {
+      setState(() {
+        _checking = false;
+        _errorText = 'Use Wi-Fi server address, not localhost';
       });
       return;
     }
@@ -1938,56 +1998,42 @@ class _StatusGrid extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final width = constraints.maxWidth;
-        final aspectRatio = width < 360
-            ? 0.94
-            : width < 420
-            ? 1.02
-            : 1.18;
-
-        return GridView.count(
-          crossAxisCount: 2,
-          shrinkWrap: true,
-          crossAxisSpacing: 10,
-          mainAxisSpacing: 10,
-          physics: const NeverScrollableScrollPhysics(),
-          childAspectRatio: aspectRatio,
-          children: [
-            _StatusCard(
-              title: 'Scale',
-              value: snapshot.scaleValue,
-              caption: snapshot.scaleCaption,
-              icon: Icons.scale_outlined,
-            ),
-            _StatusCard(
-              title: 'Zebra',
-              value: snapshot.zebraValue,
-              caption: snapshot.zebraCaption,
-              icon: Icons.print_outlined,
-            ),
-            _StatusCard(
-              title: 'Batch',
-              value: snapshot.batchValue,
-              caption: snapshot.batchCaption,
-              icon: Icons.inventory_2_outlined,
-            ),
-            _StatusCard(
-              title: 'Bridge',
-              value: snapshot.bridgeValue,
-              caption: snapshot.bridgeCaption,
-              icon: Icons.sync_outlined,
-            ),
-          ],
-        );
-      },
+    return Column(
+      children: [
+        _StatusRow(
+          title: 'Scale',
+          value: snapshot.scaleValue,
+          caption: snapshot.scaleCaption,
+          icon: Icons.scale_outlined,
+        ),
+        Divider(color: Theme.of(context).colorScheme.outlineVariant),
+        _StatusRow(
+          title: 'Zebra',
+          value: snapshot.zebraValue,
+          caption: snapshot.zebraCaption,
+          icon: Icons.print_outlined,
+        ),
+        Divider(color: Theme.of(context).colorScheme.outlineVariant),
+        _StatusRow(
+          title: 'Batch',
+          value: snapshot.batchValue,
+          caption: snapshot.batchCaption,
+          icon: Icons.inventory_2_outlined,
+        ),
+        Divider(color: Theme.of(context).colorScheme.outlineVariant),
+        _StatusRow(
+          title: 'Bridge',
+          value: snapshot.bridgeValue,
+          caption: snapshot.bridgeCaption,
+          icon: Icons.sync_outlined,
+        ),
+      ],
     );
   }
 }
 
-class _StatusCard extends StatelessWidget {
-  const _StatusCard({
+class _StatusRow extends StatelessWidget {
+  const _StatusRow({
     required this.title,
     required this.value,
     required this.caption,
@@ -2004,40 +2050,41 @@ class _StatusCard extends StatelessWidget {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
 
-    return Container(
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: scheme.surfaceContainerHighest.withValues(alpha: 0.28),
-        borderRadius: BorderRadius.circular(22),
-      ),
-      child: Column(
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Icon(icon, color: scheme.primary, size: 20),
-          const Spacer(),
-          Text(
-            title,
-            style: theme.textTheme.labelLarge?.copyWith(
-              color: scheme.onSurfaceVariant,
-              fontWeight: FontWeight.w700,
-              fontSize: 13,
-            ),
-          ),
-          const SizedBox(height: 2),
-          Text(
-            value,
-            style: theme.textTheme.titleLarge?.copyWith(
-              fontWeight: FontWeight.w800,
-              fontSize: 18,
-              height: 1.05,
-            ),
-          ),
-          const SizedBox(height: 2),
-          Text(
-            caption,
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: scheme.onSurfaceVariant,
-              height: 1.1,
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: theme.textTheme.labelLarge?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  value,
+                  style: theme.textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w800,
+                    height: 1.05,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  caption,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                    height: 1.1,
+                  ),
+                ),
+              ],
             ),
           ),
         ],
@@ -2118,6 +2165,7 @@ class MonitorSnapshot {
     required this.batchItemCode,
     required this.batchItemName,
     required this.batchWarehouse,
+    required this.latencyMs,
   });
 
   factory MonitorSnapshot.empty() {
@@ -2137,6 +2185,7 @@ class MonitorSnapshot {
       batchItemCode: '',
       batchItemName: '',
       batchWarehouse: '',
+      latencyMs: 0,
     );
   }
 
@@ -2186,6 +2235,7 @@ class MonitorSnapshot {
       batchItemCode: batchItemCode,
       batchItemName: batchItem,
       batchWarehouse: batchWarehouse,
+      latencyMs: 0,
     );
   }
 
@@ -2207,6 +2257,7 @@ class MonitorSnapshot {
       batchItemCode: batch.itemCode,
       batchItemName: itemName,
       batchWarehouse: batch.warehouse,
+      latencyMs: latencyMs,
     );
   }
 
@@ -2225,6 +2276,28 @@ class MonitorSnapshot {
   final String batchItemCode;
   final String batchItemName;
   final String batchWarehouse;
+  final int latencyMs;
+
+  MonitorSnapshot copyWithLatency(int latencyMs) {
+    return MonitorSnapshot(
+      scaleValue: scaleValue,
+      scaleCaption: scaleCaption,
+      zebraValue: zebraValue,
+      zebraCaption: zebraCaption,
+      batchValue: batchValue,
+      batchCaption: batchCaption,
+      bridgeValue: bridgeValue,
+      bridgeCaption: bridgeCaption,
+      serverLabel: serverLabel,
+      monitorLabel: monitorLabel,
+      printerLabel: printerLabel,
+      batchActive: batchActive,
+      batchItemCode: batchItemCode,
+      batchItemName: batchItemName,
+      batchWarehouse: batchWarehouse,
+      latencyMs: latencyMs,
+    );
+  }
 }
 
 class MobileItem {
@@ -2356,40 +2429,42 @@ Future<DiscoveryResult> discoverServers(
   http.Client client, {
   ServerEndpoint? preferredEndpoint,
 }) async {
-  final announcementsFuture = network_candidates.discoverAnnouncements(
-    port: _discoveryPort,
-    timeout: _udpDiscoveryTimeout,
-  );
-  final candidates = await network_candidates.collectCandidateHosts();
+  final announcementsFuture = _loadDiscoveryAnnouncements();
+  final candidates = await _loadCandidateHosts();
   final resultsByKey = <String, DiscoveredServer>{};
-
   final probeTargets = <ServerEndpoint>[];
-  if (preferredEndpoint != null) {
-    probeTargets.add(preferredEndpoint);
+  final seenBaseUrls = <String>{};
+
+  void addTarget(ServerEndpoint endpoint) {
+    if (seenBaseUrls.add(endpoint.baseUrl)) {
+      probeTargets.add(endpoint);
+    }
+  }
+
+  if (preferredEndpoint != null &&
+      !_shouldSkipDiscoveryHost(preferredEndpoint.host)) {
+    addTarget(preferredEndpoint);
   }
   for (final host in candidates) {
-    final endpoint = ServerEndpoint(
-      host: host,
-      port: _defaultApiPort,
-      baseUrl: 'http://$host:$_defaultApiPort',
-    );
-    if (probeTargets.any((item) => item.baseUrl == endpoint.baseUrl)) {
+    if (_shouldSkipDiscoveryHost(host)) {
       continue;
     }
-    probeTargets.add(endpoint);
+    addTarget(
+      ServerEndpoint(
+        host: host,
+        port: _defaultApiPort,
+        baseUrl: 'http://$host:$_defaultApiPort',
+      ),
+    );
   }
 
-  final directScanned = await Future.wait(
-    probeTargets.map((endpoint) {
-      return probeServer(client, endpoint, timeout: _fastProbeTimeout);
-    }),
+  var candidateCount = probeTargets.length;
+  final directScanned = await _probeServers(
+    client,
+    probeTargets,
+    timeout: _fastProbeTimeout,
   );
-  for (final server in directScanned.whereType<DiscoveredServer>()) {
-    final existing = resultsByKey[server.discoveryKey];
-    if (existing == null || server.latencyMs < existing.latencyMs) {
-      resultsByKey[server.discoveryKey] = server;
-    }
-  }
+  _mergeDiscoveredServers(resultsByKey, directScanned);
 
   final announcements = await announcementsFuture;
   for (final announcement in announcements) {
@@ -2407,10 +2482,30 @@ Future<DiscoveryResult> discoverServers(
       ),
       latencyMs: announcement.latencyMs,
     );
-    final existing = resultsByKey[server.discoveryKey];
-    if (existing == null || server.latencyMs < existing.latencyMs) {
-      resultsByKey[server.discoveryKey] = server;
+    _mergeDiscoveredServer(resultsByKey, server);
+  }
+
+  if (resultsByKey.isEmpty) {
+    final subnetHosts = await _loadSubnetCandidateHosts();
+    final fallbackTargets = <ServerEndpoint>[];
+    for (final host in subnetHosts) {
+      final endpoint = ServerEndpoint(
+        host: host,
+        port: _defaultApiPort,
+        baseUrl: 'http://$host:$_defaultApiPort',
+      );
+      if (seenBaseUrls.add(endpoint.baseUrl)) {
+        fallbackTargets.add(endpoint);
+      }
     }
+    candidateCount += fallbackTargets.length;
+    final fallbackScanned = await _probeServers(
+      client,
+      fallbackTargets,
+      timeout: _fallbackProbeTimeout,
+      concurrency: _fallbackProbeConcurrency,
+    );
+    _mergeDiscoveredServers(resultsByKey, fallbackScanned);
   }
 
   final results = resultsByKey.values.toList();
@@ -2431,7 +2526,84 @@ Future<DiscoveryResult> discoverServers(
     return left.endpoint.baseUrl.compareTo(right.endpoint.baseUrl);
   });
 
-  return DiscoveryResult(servers: results, candidateCount: candidates.length);
+  return DiscoveryResult(servers: results, candidateCount: candidateCount);
+}
+
+Future<List<String>> _loadCandidateHosts() async {
+  try {
+    return await network_candidates.collectCandidateHosts();
+  } catch (_) {
+    return const ['gscale.local'];
+  }
+}
+
+Future<List<String>> _loadSubnetCandidateHosts() async {
+  try {
+    return await network_candidates.collectSubnetCandidateHosts();
+  } catch (_) {
+    return const [];
+  }
+}
+
+Future<List<network_candidates.DiscoveryAnnouncement>>
+_loadDiscoveryAnnouncements() async {
+  try {
+    return await network_candidates.discoverAnnouncements(
+      port: _discoveryPort,
+      timeout: _udpDiscoveryTimeout,
+    );
+  } catch (_) {
+    return const <network_candidates.DiscoveryAnnouncement>[];
+  }
+}
+
+void _mergeDiscoveredServers(
+  Map<String, DiscoveredServer> resultsByKey,
+  Iterable<DiscoveredServer> servers,
+) {
+  for (final server in servers) {
+    _mergeDiscoveredServer(resultsByKey, server);
+  }
+}
+
+void _mergeDiscoveredServer(
+  Map<String, DiscoveredServer> resultsByKey,
+  DiscoveredServer server,
+) {
+  final existing = resultsByKey[server.discoveryKey];
+  if (existing == null || server.latencyMs < existing.latencyMs) {
+    resultsByKey[server.discoveryKey] = server;
+  }
+}
+
+Future<List<DiscoveredServer>> _probeServers(
+  http.Client client,
+  List<ServerEndpoint> endpoints, {
+  Duration timeout = _fastProbeTimeout,
+  int concurrency = 12,
+}) async {
+  if (endpoints.isEmpty) {
+    return const [];
+  }
+
+  final results = <DiscoveredServer>[];
+  var nextIndex = 0;
+  final workerCount = endpoints.length < concurrency
+      ? endpoints.length
+      : concurrency;
+
+  Future<void> worker() async {
+    while (nextIndex < endpoints.length) {
+      final endpoint = endpoints[nextIndex++];
+      final server = await probeServer(client, endpoint, timeout: timeout);
+      if (server != null) {
+        results.add(server);
+      }
+    }
+  }
+
+  await Future.wait(List.generate(workerCount, (_) => worker()));
+  return results;
 }
 
 Future<DiscoveredServer?> probeServer(
@@ -2534,5 +2706,27 @@ Future<ServerEndpoint?> loadLastUsedServer() async {
   if (value == null || value.trim().isEmpty) {
     return null;
   }
-  return parseServerEndpoint(value);
+  final endpoint = parseServerEndpoint(value);
+  if (endpoint == null || _shouldSkipDiscoveryHost(endpoint.host)) {
+    await prefs.remove(_lastServerKey);
+    return null;
+  }
+  return endpoint;
+}
+
+bool _shouldSkipDiscoveryHost(String host) {
+  final normalized = host.trim().toLowerCase();
+  return normalized == '127.0.0.1' ||
+      normalized == 'localhost' ||
+      normalized == '::1' ||
+      normalized == '[::1]' ||
+      normalized == '10.0.2.2';
+}
+
+String _sanitizeManualServerAddress(String raw) {
+  final endpoint = parseServerEndpoint(raw);
+  if (endpoint == null || _shouldSkipDiscoveryHost(endpoint.host)) {
+    return _defaultWifiServerAddress;
+  }
+  return endpoint.baseUrl;
 }

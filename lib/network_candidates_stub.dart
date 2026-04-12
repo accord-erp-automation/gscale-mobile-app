@@ -19,7 +19,11 @@ class DiscoveryAnnouncement {
 }
 
 Future<List<String>> collectCandidateHosts() async {
-  return const ['127.0.0.1', 'gscale.local'];
+  return const ['gscale.local'];
+}
+
+Future<List<String>> collectSubnetCandidateHosts() async {
+  return const [];
 }
 
 Future<List<DiscoveryAnnouncement>> discoverAnnouncements({

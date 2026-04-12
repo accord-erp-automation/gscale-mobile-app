@@ -23,12 +23,18 @@ class DiscoveryAnnouncement {
 }
 
 const _discoveryProbeV1 = 'GSCALE_DISCOVER_V1';
+const _discoveryProbeAttempts = 3;
+const _discoveryProbeRetryDelay = Duration(milliseconds: 120);
 
 Future<List<String>> collectCandidateHosts() async {
-  final hosts = <String>{'127.0.0.1', '10.0.2.2', 'gscale.local'};
+  return const ['gscale.local'];
+}
+
+Future<List<String>> collectSubnetCandidateHosts() async {
+  final hosts = <String>{};
 
   final interfaces = await NetworkInterface.list(
-    includeLoopback: true,
+    includeLoopback: false,
     includeLinkLocal: false,
     type: InternetAddressType.IPv4,
   );
@@ -36,17 +42,32 @@ Future<List<String>> collectCandidateHosts() async {
   for (final iface in interfaces) {
     for (final address in iface.addresses) {
       final host = address.address.trim();
-      if (_isPrivateIPv4(host) || host == '127.0.0.1') {
-        hosts.add(host);
+      if (!_isPrivateIPv4(host)) {
+        continue;
+      }
+
+      final parts = host.split('.');
+      if (parts.length != 4) {
+        continue;
+      }
+
+      final selfOctet = int.tryParse(parts[3]);
+      if (selfOctet == null || selfOctet < 1 || selfOctet > 254) {
+        continue;
+      }
+
+      final prefix = '${parts[0]}.${parts[1]}.${parts[2]}';
+      for (var octet = 1; octet < 255; octet++) {
+        if (octet == selfOctet) {
+          continue;
+        }
+        hosts.add('$prefix.$octet');
       }
     }
   }
 
-  final ipv4Hosts = hosts.where((host) => _looksLikeIPv4(host)).toList()
-    ..sort(_compareIPv4);
-  final namedHosts = hosts.where((host) => !_looksLikeIPv4(host)).toList()
-    ..sort();
-  return [...ipv4Hosts, ...namedHosts];
+  final out = hosts.toList()..sort(_compareIPv4);
+  return out;
 }
 
 Future<List<DiscoveryAnnouncement>> discoverAnnouncements({
@@ -73,7 +94,13 @@ Future<List<DiscoveryAnnouncement>> discoverAnnouncements({
     if (datagram == null) {
       return;
     }
-    final payload = jsonDecode(utf8.decode(datagram.data));
+    final payloadText = utf8.decode(datagram.data);
+    dynamic payload;
+    try {
+      payload = jsonDecode(payloadText);
+    } catch (_) {
+      return;
+    }
     if (payload is! Map<String, dynamic>) {
       return;
     }
@@ -97,20 +124,37 @@ Future<List<DiscoveryAnnouncement>> discoverAnnouncements({
 
   final targets = await _collectBroadcastTargets();
   final packet = utf8.encode(_discoveryProbeV1);
-  for (final target in targets) {
-    socket.send(packet, target, port);
-  }
-
   Timer(timeout, () {
     if (!done.isCompleted) {
       done.complete();
     }
   });
+  unawaited(_sendDiscoveryProbes(socket, targets, packet, port));
 
   await done.future;
   await sub.cancel();
   socket.close();
   return results.values.toList();
+}
+
+Future<void> _sendDiscoveryProbes(
+  RawDatagramSocket socket,
+  List<InternetAddress> targets,
+  List<int> packet,
+  int port,
+) async {
+  for (var attempt = 0; attempt < _discoveryProbeAttempts; attempt++) {
+    for (final target in targets) {
+      try {
+        socket.send(packet, target, port);
+      } catch (_) {
+        // Keep retrying other interfaces even if one route is unavailable.
+      }
+    }
+    if (attempt != _discoveryProbeAttempts - 1) {
+      await Future<void>.delayed(_discoveryProbeRetryDelay);
+    }
+  }
 }
 
 Future<List<InternetAddress>> _collectBroadcastTargets() async {
@@ -168,10 +212,6 @@ bool _isPrivateIPv4(String host) {
     return true;
   }
   return false;
-}
-
-bool _looksLikeIPv4(String host) {
-  return host.split('.').length == 4;
 }
 
 int _compareIPv4(String left, String right) {
