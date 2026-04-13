@@ -333,6 +333,9 @@ class OperatorDashboardPage extends StatefulWidget {
 
 class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
   final http.Client _client = http.Client();
+  final TextEditingController _erpUrlController = TextEditingController();
+  final TextEditingController _erpApiKeyController = TextEditingController();
+  final TextEditingController _erpApiSecretController = TextEditingController();
   final TextEditingController _warehouseSearchController =
       TextEditingController();
   final FocusNode _warehouseSearchFocusNode = FocusNode();
@@ -345,15 +348,23 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
   bool _requestInFlight = false;
   bool _warehousesLoading = false;
   bool _batchActionLoading = false;
+  bool _erpSetupLoading = false;
   bool _connected = false;
+  bool _erpSetupExpanded = false;
   String _statusText = 'idle';
   String _errorText = '';
   String _warehousesError = '';
+  String _erpSetupError = '';
+  bool _erpWriteConfigured = false;
+  bool _erpReadConfigured = false;
+  String _erpConfiguredUrl = '';
   MonitorSnapshot _snapshot = MonitorSnapshot.empty();
   List<MobileWarehouse> _warehouses = const [];
   MobileItem? _selectedItem;
   MobileWarehouse? _selectedWarehouse;
   Timer? _pingTimer;
+  Timer? _printerStatusTimer;
+  String _printerStatusOverride = '';
 
   @override
   void initState() {
@@ -371,6 +382,10 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
   void dispose() {
     _warehouseSearchDebounce?.cancel();
     _pingTimer?.cancel();
+    _printerStatusTimer?.cancel();
+    _erpUrlController.dispose();
+    _erpApiKeyController.dispose();
+    _erpApiSecretController.dispose();
     _warehouseSearchController.dispose();
     _warehouseSearchFocusNode.dispose();
     _stopLiveStream();
@@ -506,6 +521,7 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
                 _statusText = 'live';
                 _errorText = '';
               });
+              unawaited(_refreshSetupStatus());
               return;
             }
             if (line.startsWith(':')) {
@@ -573,6 +589,7 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
           _errorText = '';
         });
       }
+      await _refreshSetupStatus();
     } catch (error) {
       if (mounted) {
         setState(() {
@@ -588,6 +605,37 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
           _manualLoading = false;
         });
       }
+    }
+  }
+
+  Future<void> _refreshSetupStatus() async {
+    try {
+      final response = await _client
+          .get(
+            Uri.parse(
+              '${widget.server.endpoint.baseUrl}/v1/mobile/setup/status',
+            ),
+          )
+          .timeout(const Duration(seconds: 4));
+      if (response.statusCode < 200 || response.statusCode > 299) {
+        return;
+      }
+      final payload = jsonDecode(response.body) as Map<String, dynamic>;
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        final writeConfigured = payload['erp_write_configured'] == true;
+        final readConfigured = payload['erp_read_configured'] == true;
+        _erpWriteConfigured = writeConfigured;
+        _erpReadConfigured = readConfigured;
+        _erpConfiguredUrl = _text(payload['erp_url']);
+        if (!writeConfigured && !readConfigured) {
+          _erpSetupExpanded = true;
+        }
+      });
+    } catch (_) {
+      return;
     }
   }
 
@@ -615,6 +663,16 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
     if (snapshot.printerEventKey.isNotEmpty &&
         snapshot.printerEventKey != previous.printerEventKey) {
       final messenger = ScaffoldMessenger.maybeOf(context);
+      _printerStatusTimer?.cancel();
+      _printerStatusOverride = snapshot.printerEventMessage;
+      _printerStatusTimer = Timer(const Duration(seconds: 4), () {
+        if (!mounted) {
+          return;
+        }
+        setState(() {
+          _printerStatusOverride = '';
+        });
+      });
       if (messenger != null) {
         if (snapshot.printerState == 'done') {
           WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -666,10 +724,7 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
     }
     _warehouseSearchDebounce = Timer(const Duration(milliseconds: 220), () {
       unawaited(
-        _loadWarehouses(
-          itemCode: _selectedItem!.itemCode,
-          query: query,
-        ),
+        _loadWarehouses(itemCode: _selectedItem!.itemCode, query: query),
       );
     });
   }
@@ -706,9 +761,7 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
     final rawWarehouses =
         (payload['warehouses'] as List?)?.cast<Map<String, dynamic>>() ??
         const [];
-    return rawWarehouses
-        .map(MobileWarehouse.fromJson)
-        .toList(growable: false);
+    return rawWarehouses.map(MobileWarehouse.fromJson).toList(growable: false);
   }
 
   Future<void> _loadWarehouses({
@@ -907,6 +960,105 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
     }
   }
 
+  Future<void> _submitERPSetup() async {
+    if (_erpSetupLoading) {
+      return;
+    }
+    setState(() {
+      _erpSetupLoading = true;
+      _erpSetupError = '';
+    });
+    try {
+      final response = await _client
+          .post(
+            _apiUri('/v1/mobile/setup/erp'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'erp_url': _erpUrlController.text.trim(),
+              'erp_api_key': _erpApiKeyController.text.trim(),
+              'erp_api_secret': _erpApiSecretController.text.trim(),
+            }),
+          )
+          .timeout(const Duration(seconds: 6));
+      final payload = jsonDecode(response.body) as Map<String, dynamic>;
+      if (response.statusCode < 200 || response.statusCode > 299) {
+        throw Exception(
+          _text(
+            payload['message'],
+            fallback: _text(payload['error'], fallback: 'ERP setup failed'),
+          ),
+        );
+      }
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _erpWriteConfigured = payload['erp_write_configured'] == true;
+        _erpReadConfigured = payload['erp_read_configured'] == true;
+        _erpConfiguredUrl = _text(payload['erp_url']);
+        _erpSetupExpanded = false;
+        _erpUrlController.clear();
+        _erpApiKeyController.clear();
+        _erpApiSecretController.clear();
+        _erpSetupLoading = false;
+      });
+      ScaffoldMessenger.maybeOf(
+        context,
+      )?.showSnackBar(const SnackBar(content: Text('ERP setup saqlandi')));
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _erpSetupLoading = false;
+        _erpSetupError = error.toString();
+      });
+    }
+  }
+
+  Future<void> _clearERPSetup() async {
+    if (_erpSetupLoading) {
+      return;
+    }
+    setState(() {
+      _erpSetupLoading = true;
+      _erpSetupError = '';
+    });
+    try {
+      final response = await _client
+          .delete(_apiUri('/v1/mobile/setup/erp'))
+          .timeout(const Duration(seconds: 6));
+      if (response.statusCode < 200 || response.statusCode > 299) {
+        final payload = jsonDecode(response.body) as Map<String, dynamic>;
+        throw Exception(_text(payload['error'], fallback: 'ERP clear failed'));
+      }
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _erpWriteConfigured = false;
+        _erpReadConfigured = false;
+        _erpConfiguredUrl = '';
+        _erpSetupExpanded = true;
+        _erpUrlController.clear();
+        _erpApiKeyController.clear();
+        _erpApiSecretController.clear();
+        _erpSetupLoading = false;
+      });
+      ScaffoldMessenger.maybeOf(
+        context,
+      )?.showSnackBar(const SnackBar(content: Text('ERP setup tozalandi')));
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _erpSetupLoading = false;
+        _erpSetupError = error.toString();
+      });
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -921,30 +1073,24 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
           tooltip: 'Change server',
         ),
         title: Text(server.handshake.serverName),
-        actions: _selectedSection == 0
-            ? [
-                Padding(
-                  padding: const EdgeInsets.only(right: 18),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        Icons.speed_outlined,
-                        size: 18,
-                        color: scheme.primary,
-                      ),
-                      const SizedBox(width: 8),
-                      Text(
-                        _snapshot.latencyMs > 0 ? '${_snapshot.latencyMs} ms' : '—',
-                        style: theme.textTheme.bodyMedium?.copyWith(
-                          color: scheme.onSurface,
-                        ),
-                      ),
-                    ],
+        actions: [
+          Padding(
+            padding: const EdgeInsets.only(right: 18),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.speed_outlined, size: 18, color: scheme.primary),
+                const SizedBox(width: 8),
+                Text(
+                  _snapshot.latencyMs > 0 ? '${_snapshot.latencyMs} ms' : '—',
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    color: scheme.onSurface,
                   ),
                 ),
-              ]
-            : null,
+              ],
+            ),
+          ),
+        ],
       ),
       body: AnimatedSwitcher(
         duration: const Duration(milliseconds: 220),
@@ -988,58 +1134,21 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
     ColorScheme scheme,
     DiscoveredServer server,
   ) {
+    final hasConfiguredERP =
+        _erpWriteConfigured ||
+        _erpReadConfigured ||
+        _erpConfiguredUrl.isNotEmpty;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    server.handshake.displayName,
-                    style: theme.textTheme.headlineSmall?.copyWith(
-                      fontWeight: FontWeight.w800,
-                      letterSpacing: -0.4,
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    server.endpoint.baseUrl,
-                    style: theme.textTheme.bodyMedium?.copyWith(
-                      color: scheme.onSurfaceVariant,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(width: 12),
-            Chip(
-              avatar: Icon(
-                _connected
-                    ? Icons.radio_button_checked_rounded
-                    : Icons.radio_button_off_rounded,
-                size: 18,
-              ),
-              label: Text(_connected ? 'Connected' : 'Offline'),
-            ),
-          ],
-        ),
-        const SizedBox(height: 12),
         Wrap(
           spacing: 8,
           runSpacing: 8,
           children: [
             Chip(label: Text(server.handshake.role.toUpperCase())),
             Chip(label: Text(server.handshake.serverRef)),
-            if (server.latencyMs > 0)
-              Chip(label: Text('${server.latencyMs} ms')),
           ],
         ),
-        const SizedBox(height: 22),
-        _SectionLabel(title: 'Server health', subtitle: ''),
         if (_errorText.isNotEmpty) ...[
           const SizedBox(height: 12),
           Text(
@@ -1047,40 +1156,154 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
             style: theme.textTheme.bodySmall?.copyWith(color: scheme.error),
           ),
         ],
-        const SizedBox(height: 14),
+        const SizedBox(height: 22),
+        _SectionLabel(title: 'ERP setup', subtitle: ''),
+        const SizedBox(height: 12),
         _MiniIconRow(
-          icon: Icons.wifi_tethering,
-          text: _connected ? _snapshot.serverLabel : server.endpoint.baseUrl,
+          icon: Icons.key_outlined,
+          text: _erpWriteConfigured
+              ? 'ERP write configured'
+              : 'ERP write not configured',
         ),
-        const SizedBox(height: 14),
-        Divider(color: scheme.outlineVariant.withValues(alpha: 0.8)),
-        const SizedBox(height: 14),
+        const SizedBox(height: 12),
         _MiniIconRow(
-          icon: Icons.monitor_heart_outlined,
-          text: _connected
-              ? 'Live snapshot qabul qilinyapti'
-              : 'Live stream ulanmagan',
+          icon: Icons.storage_outlined,
+          text: _erpReadConfigured
+              ? 'Catalog service linked'
+              : 'Catalog service topilmadi',
         ),
-        const SizedBox(height: 14),
-        Divider(color: scheme.outlineVariant.withValues(alpha: 0.8)),
-        const SizedBox(height: 14),
-        _MiniIconRow(
-          icon: Icons.badge_outlined,
-          text:
-              '${server.handshake.displayName} • ${server.handshake.role.toUpperCase()}',
+        if (_erpConfiguredUrl.isNotEmpty) ...[
+          const SizedBox(height: 12),
+          _MiniIconRow(icon: Icons.link_rounded, text: _erpConfiguredUrl),
+        ],
+        const SizedBox(height: 16),
+        Row(
+          children: [
+            Expanded(
+              child: OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                onPressed: _erpSetupLoading
+                    ? null
+                    : () {
+                        setState(() {
+                          if (!_erpSetupExpanded) {
+                            if (_erpUrlController.text.trim().isEmpty) {
+                              _erpUrlController.text = _erpConfiguredUrl;
+                            }
+                          }
+                          _erpSetupExpanded = !_erpSetupExpanded;
+                        });
+                      },
+                icon: Icon(
+                  _erpSetupExpanded
+                      ? Icons.expand_less_rounded
+                      : Icons.expand_more_rounded,
+                ),
+                label: Text(
+                  hasConfiguredERP
+                      ? (_erpSetupExpanded ? 'Hide setup' : 'Show setup')
+                      : 'ERP setup',
+                ),
+              ),
+            ),
+            if (hasConfiguredERP) ...[
+              const SizedBox(width: 10),
+              Expanded(
+                child: OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                  onPressed: _erpSetupLoading ? null : _clearERPSetup,
+                  icon: const Icon(Icons.delete_outline_rounded),
+                  label: const Text('Clear ERP'),
+                ),
+              ),
+            ],
+          ],
         ),
+        if (_erpSetupExpanded || !hasConfiguredERP) ...[
+          const SizedBox(height: 16),
+          TextField(
+            controller: _erpUrlController,
+            keyboardType: TextInputType.url,
+            decoration: const InputDecoration(
+              labelText: 'ERP URL',
+              hintText: 'http://localhost:8000',
+              prefixIcon: Icon(Icons.link_rounded),
+            ),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _erpApiKeyController,
+            decoration: const InputDecoration(
+              labelText: 'ERP API key',
+              hintText: 'API key',
+              prefixIcon: Icon(Icons.vpn_key_outlined),
+            ),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _erpApiSecretController,
+            obscureText: true,
+            decoration: const InputDecoration(
+              labelText: 'ERP API secret',
+              hintText: 'API secret',
+              prefixIcon: Icon(Icons.password_rounded),
+            ),
+          ),
+        ],
+        if (_erpSetupError.isNotEmpty) ...[
+          const SizedBox(height: 10),
+          Text(
+            _erpSetupError,
+            style: theme.textTheme.bodySmall?.copyWith(color: scheme.error),
+          ),
+        ],
         const SizedBox(height: 24),
         Row(
           children: [
             Expanded(
               child: FilledButton(
+                style: FilledButton.styleFrom(
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
                 onPressed: _manualLoading ? null : () => _refresh(manual: true),
                 child: const Icon(Icons.refresh_rounded),
               ),
             ),
             const SizedBox(width: 10),
             Expanded(
+              child: FilledButton.icon(
+                style: FilledButton.styleFrom(
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                onPressed:
+                    (_erpSetupLoading ||
+                        (!_erpSetupExpanded && hasConfiguredERP))
+                    ? null
+                    : _submitERPSetup,
+                icon: const Icon(Icons.save_outlined),
+                label: Text(_erpSetupLoading ? 'Saving...' : 'Save ERP'),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
               child: OutlinedButton(
+                style: OutlinedButton.styleFrom(
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
                 onPressed: widget.onChangeServer,
                 child: const Icon(Icons.dns_rounded),
               ),
@@ -1100,6 +1323,9 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
     final selectedProduct = _selectedItem;
     final selectedWarehouse = _selectedWarehouse;
     final batchRunning = _snapshot.batchActive;
+    final printerStatusText = _printerStatusOverride.isNotEmpty
+        ? _printerStatusOverride
+        : _snapshot.printerLabel;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -1135,10 +1361,7 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
           ),
         ],
         const SizedBox(height: 12),
-        _MiniIconRow(
-          icon: Icons.print_outlined,
-          text: _snapshot.printerLabel,
-        ),
+        _MiniIconRow(icon: Icons.print_outlined, text: printerStatusText),
         const SizedBox(height: 28),
         _SectionLabel(title: 'Item selection', subtitle: ''),
         const SizedBox(height: 8),
@@ -1232,12 +1455,7 @@ class _DashboardScrollView extends StatelessWidget {
   Widget build(BuildContext context) {
     final bottomInset = MediaQuery.paddingOf(context).bottom;
     return ListView(
-      padding: EdgeInsets.fromLTRB(
-        18,
-        8,
-        18,
-        24 + bottomInset + 96,
-      ),
+      padding: EdgeInsets.fromLTRB(18, 8, 18, 24 + bottomInset + 96),
       children: [child],
     );
   }
@@ -1635,11 +1853,7 @@ class _ItemOptionTile extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 12),
-            if (selected)
-              Icon(
-                Icons.check_rounded,
-                color: scheme.primary,
-              ),
+            if (selected) Icon(Icons.check_rounded, color: scheme.primary),
           ],
         ),
       ),
@@ -1691,11 +1905,7 @@ class _WarehouseOptionTile extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 12),
-            if (selected)
-              Icon(
-                Icons.check_rounded,
-                color: scheme.primary,
-              ),
+            if (selected) Icon(Icons.check_rounded, color: scheme.primary),
           ],
         ),
       ),
@@ -1704,10 +1914,7 @@ class _WarehouseOptionTile extends StatelessWidget {
 }
 
 class _ItemPickerSheet extends StatefulWidget {
-  const _ItemPickerSheet({
-    required this.fetchItems,
-    this.initialItem,
-  });
+  const _ItemPickerSheet({required this.fetchItems, this.initialItem});
 
   final Future<List<MobileItem>> Function({required String query}) fetchItems;
   final MobileItem? initialItem;
@@ -1727,7 +1934,6 @@ class _ItemPickerSheetState extends State<_ItemPickerSheet> {
   void initState() {
     super.initState();
     _controller = TextEditingController();
-    unawaited(_loadItems());
   }
 
   @override
@@ -1739,12 +1945,31 @@ class _ItemPickerSheetState extends State<_ItemPickerSheet> {
 
   void _scheduleSearch() {
     _debounce?.cancel();
+    if (_controller.text.trim().isEmpty) {
+      setState(() {
+        _items = const [];
+        _loading = false;
+        _error = '';
+      });
+      return;
+    }
     _debounce = Timer(const Duration(milliseconds: 220), () {
       unawaited(_loadItems());
     });
   }
 
   Future<void> _loadItems() async {
+    final query = _controller.text.trim();
+    if (query.isEmpty) {
+      if (mounted) {
+        setState(() {
+          _items = const [];
+          _loading = false;
+          _error = '';
+        });
+      }
+      return;
+    }
     if (!mounted) {
       return;
     }
@@ -1753,7 +1978,7 @@ class _ItemPickerSheetState extends State<_ItemPickerSheet> {
       _error = '';
     });
     try {
-      final items = await widget.fetchItems(query: _controller.text.trim());
+      final items = await widget.fetchItems(query: query);
       if (!mounted) {
         return;
       }
@@ -1826,9 +2051,7 @@ class _ItemPickerSheetState extends State<_ItemPickerSheet> {
                       child: Container(
                         color: scheme.surfaceContainerLow,
                         child: _loading
-                            ? const Center(
-                                child: CircularProgressIndicator(),
-                              )
+                            ? const Center(child: CircularProgressIndicator())
                             : _error.isNotEmpty
                             ? Center(
                                 child: Padding(
@@ -1901,7 +2124,8 @@ class _WarehousePickerSheet extends StatefulWidget {
   final Future<List<MobileWarehouse>> Function({
     required String itemCode,
     required String query,
-  }) fetchWarehouses;
+  })
+  fetchWarehouses;
   final MobileWarehouse? initialWarehouse;
 
   @override
@@ -1919,7 +2143,6 @@ class _WarehousePickerSheetState extends State<_WarehousePickerSheet> {
   void initState() {
     super.initState();
     _controller = TextEditingController();
-    unawaited(_loadWarehouses());
   }
 
   @override
@@ -1931,12 +2154,31 @@ class _WarehousePickerSheetState extends State<_WarehousePickerSheet> {
 
   void _scheduleSearch() {
     _debounce?.cancel();
+    if (_controller.text.trim().isEmpty) {
+      setState(() {
+        _warehouses = const [];
+        _loading = false;
+        _error = '';
+      });
+      return;
+    }
     _debounce = Timer(const Duration(milliseconds: 220), () {
       unawaited(_loadWarehouses());
     });
   }
 
   Future<void> _loadWarehouses() async {
+    final query = _controller.text.trim();
+    if (query.isEmpty) {
+      if (mounted) {
+        setState(() {
+          _warehouses = const [];
+          _loading = false;
+          _error = '';
+        });
+      }
+      return;
+    }
     if (!mounted) {
       return;
     }
@@ -1947,7 +2189,7 @@ class _WarehousePickerSheetState extends State<_WarehousePickerSheet> {
     try {
       final warehouses = await widget.fetchWarehouses(
         itemCode: widget.itemCode,
-        query: _controller.text.trim(),
+        query: query,
       );
       if (!mounted) {
         return;
@@ -2021,9 +2263,7 @@ class _WarehousePickerSheetState extends State<_WarehousePickerSheet> {
                       child: Container(
                         color: scheme.surfaceContainerLow,
                         child: _loading
-                            ? const Center(
-                                child: CircularProgressIndicator(),
-                              )
+                            ? const Center(child: CircularProgressIndicator())
                             : _error.isNotEmpty
                             ? Center(
                                 child: Padding(
@@ -2598,8 +2838,13 @@ class MonitorSnapshot {
     final activePrinterEPC = _text(printer['active_epc']);
     final history =
         (printer['history'] as List?)?.cast<Map<String, dynamic>>() ?? const [];
-    final latestPrinter = history.isEmpty ? const <String, dynamic>{} : history.first;
-    final latestPrinterStatus = _text(latestPrinter['status'], fallback: 'idle');
+    final latestPrinter = history.isEmpty
+        ? const <String, dynamic>{}
+        : history.first;
+    final latestPrinterStatus = _text(
+      latestPrinter['status'],
+      fallback: 'idle',
+    );
     final latestPrinterError = _text(
       latestPrinter['error'],
       fallback: _text(printRequest['error']),
@@ -2734,11 +2979,16 @@ String buildPrinterLabel({
   required String latestPrinterError,
 }) {
   final requestState = _text(printStatus, fallback: 'idle').toLowerCase();
-  final historyState = _text(latestPrinterStatus, fallback: 'idle').toLowerCase();
+  final historyState = _text(
+    latestPrinterStatus,
+    fallback: 'idle',
+  ).toLowerCase();
   final epc = _text(latestPrinterEPC, fallback: activePrinterEPC);
   final err = _text(latestPrinterError);
 
-  if (activePrinterEPC.isNotEmpty || requestState == 'processing' || historyState == 'processing') {
+  if (activePrinterEPC.isNotEmpty ||
+      requestState == 'processing' ||
+      historyState == 'processing') {
     return epc.isEmpty ? 'Printer: printing' : 'Printer: printing • $epc';
   }
   if (historyState == 'done' || requestState == 'done') {
@@ -2756,8 +3006,13 @@ String derivePrinterState({
   required String activePrinterEPC,
 }) {
   final requestState = _text(printStatus, fallback: 'idle').toLowerCase();
-  final historyState = _text(latestPrinterStatus, fallback: 'idle').toLowerCase();
-  if (activePrinterEPC.isNotEmpty || requestState == 'processing' || historyState == 'processing') {
+  final historyState = _text(
+    latestPrinterStatus,
+    fallback: 'idle',
+  ).toLowerCase();
+  if (activePrinterEPC.isNotEmpty ||
+      requestState == 'processing' ||
+      historyState == 'processing') {
     return 'processing';
   }
   if (historyState == 'done' || requestState == 'done') {
