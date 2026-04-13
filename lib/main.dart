@@ -592,6 +592,7 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
   }
 
   void _applySnapshot(MonitorSnapshot snapshot) {
+    final previous = _snapshot;
     _snapshot = snapshot.copyWithLatency(_snapshot.latencyMs);
     if (snapshot.batchActive) {
       if (snapshot.batchItemCode.isNotEmpty) {
@@ -606,6 +607,32 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
         _selectedWarehouse = MobileWarehouse(
           warehouse: snapshot.batchWarehouse,
         );
+      }
+    }
+    if (!mounted) {
+      return;
+    }
+    if (snapshot.printerEventKey.isNotEmpty &&
+        snapshot.printerEventKey != previous.printerEventKey) {
+      final messenger = ScaffoldMessenger.maybeOf(context);
+      if (messenger != null) {
+        if (snapshot.printerState == 'done') {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            messenger
+              ..hideCurrentSnackBar()
+              ..showSnackBar(
+                SnackBar(content: Text(snapshot.printerEventMessage)),
+              );
+          });
+        } else if (snapshot.printerState == 'error') {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            messenger
+              ..hideCurrentSnackBar()
+              ..showSnackBar(
+                SnackBar(content: Text(snapshot.printerEventMessage)),
+              );
+          });
+        }
       }
     }
   }
@@ -932,6 +959,7 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
               ),
       ),
       bottomNavigationBar: NavigationBar(
+        height: 64,
         selectedIndex: _selectedSection,
         onDestinationSelected: (index) {
           setState(() {
@@ -1106,6 +1134,11 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
                 '${_snapshot.batchItemName.isEmpty ? _snapshot.batchItemCode : _snapshot.batchItemName} • ${_snapshot.batchWarehouse}',
           ),
         ],
+        const SizedBox(height: 12),
+        _MiniIconRow(
+          icon: Icons.print_outlined,
+          text: _snapshot.printerLabel,
+        ),
         const SizedBox(height: 28),
         _SectionLabel(title: 'Item selection', subtitle: ''),
         const SizedBox(height: 8),
@@ -2501,6 +2534,9 @@ class MonitorSnapshot {
     required this.serverLabel,
     required this.monitorLabel,
     required this.printerLabel,
+    required this.printerState,
+    required this.printerEventKey,
+    required this.printerEventMessage,
     required this.batchActive,
     required this.batchItemCode,
     required this.batchItemName,
@@ -2521,6 +2557,9 @@ class MonitorSnapshot {
       serverLabel: 'API: idle',
       monitorLabel: 'Scale, Zebra, batch va print request holati',
       printerLabel: 'Printer trace va action holati',
+      printerState: 'idle',
+      printerEventKey: '',
+      printerEventMessage: '',
       batchActive: false,
       batchItemCode: '',
       batchItemName: '',
@@ -2556,6 +2595,19 @@ class MonitorSnapshot {
       printer['print_mode'],
       fallback: 'trace unavailable',
     );
+    final activePrinterEPC = _text(printer['active_epc']);
+    final history =
+        (printer['history'] as List?)?.cast<Map<String, dynamic>>() ?? const [];
+    final latestPrinter = history.isEmpty ? const <String, dynamic>{} : history.first;
+    final latestPrinterStatus = _text(latestPrinter['status'], fallback: 'idle');
+    final latestPrinterError = _text(
+      latestPrinter['error'],
+      fallback: _text(printRequest['error']),
+    );
+    final latestPrinterEPC = _text(
+      latestPrinter['epc'],
+      fallback: _text(printRequest['epc']),
+    );
 
     return MonitorSnapshot(
       scaleValue: scaleWeight == null ? '--' : '$scaleWeight $scaleUnit',
@@ -2570,7 +2622,31 @@ class MonitorSnapshot {
           ? 'API: online'
           : 'API: offline',
       monitorLabel: batchItem.isEmpty ? 'No active batch' : 'Batch: $batchItem',
-      printerLabel: 'Print mode: $printerMode',
+      printerLabel: buildPrinterLabel(
+        printStatus: printStatus,
+        printerMode: printerMode,
+        activePrinterEPC: activePrinterEPC,
+        latestPrinterStatus: latestPrinterStatus,
+        latestPrinterEPC: latestPrinterEPC,
+        latestPrinterError: latestPrinterError,
+      ),
+      printerState: derivePrinterState(
+        printStatus: printStatus,
+        latestPrinterStatus: latestPrinterStatus,
+        activePrinterEPC: activePrinterEPC,
+      ),
+      printerEventKey: buildPrinterEventKey(
+        latestPrinterStatus: latestPrinterStatus,
+        latestPrinterEPC: latestPrinterEPC,
+        latestPrinterError: latestPrinterError,
+        printStatus: printStatus,
+      ),
+      printerEventMessage: buildPrinterEventMessage(
+        printStatus: printStatus,
+        latestPrinterStatus: latestPrinterStatus,
+        latestPrinterEPC: latestPrinterEPC,
+        latestPrinterError: latestPrinterError,
+      ),
       batchActive: batchActive,
       batchItemCode: batchItemCode,
       batchItemName: batchItem,
@@ -2593,6 +2669,9 @@ class MonitorSnapshot {
       serverLabel: serverLabel,
       monitorLabel: itemName.isEmpty ? 'No active batch' : 'Batch: $itemName',
       printerLabel: printerLabel,
+      printerState: printerState,
+      printerEventKey: printerEventKey,
+      printerEventMessage: printerEventMessage,
       batchActive: batch.active,
       batchItemCode: batch.itemCode,
       batchItemName: itemName,
@@ -2612,6 +2691,9 @@ class MonitorSnapshot {
   final String serverLabel;
   final String monitorLabel;
   final String printerLabel;
+  final String printerState;
+  final String printerEventKey;
+  final String printerEventMessage;
   final bool batchActive;
   final String batchItemCode;
   final String batchItemName;
@@ -2631,6 +2713,9 @@ class MonitorSnapshot {
       serverLabel: serverLabel,
       monitorLabel: monitorLabel,
       printerLabel: printerLabel,
+      printerState: printerState,
+      printerEventKey: printerEventKey,
+      printerEventMessage: printerEventMessage,
       batchActive: batchActive,
       batchItemCode: batchItemCode,
       batchItemName: batchItemName,
@@ -2638,6 +2723,94 @@ class MonitorSnapshot {
       latencyMs: latencyMs,
     );
   }
+}
+
+String buildPrinterLabel({
+  required String printStatus,
+  required String printerMode,
+  required String activePrinterEPC,
+  required String latestPrinterStatus,
+  required String latestPrinterEPC,
+  required String latestPrinterError,
+}) {
+  final requestState = _text(printStatus, fallback: 'idle').toLowerCase();
+  final historyState = _text(latestPrinterStatus, fallback: 'idle').toLowerCase();
+  final epc = _text(latestPrinterEPC, fallback: activePrinterEPC);
+  final err = _text(latestPrinterError);
+
+  if (activePrinterEPC.isNotEmpty || requestState == 'processing' || historyState == 'processing') {
+    return epc.isEmpty ? 'Printer: printing' : 'Printer: printing • $epc';
+  }
+  if (historyState == 'done' || requestState == 'done') {
+    return 'Printer: kutyapti';
+  }
+  if (historyState == 'error' || requestState == 'error') {
+    return 'Printer: kutyapti';
+  }
+  return 'Printer: kutyapti';
+}
+
+String derivePrinterState({
+  required String printStatus,
+  required String latestPrinterStatus,
+  required String activePrinterEPC,
+}) {
+  final requestState = _text(printStatus, fallback: 'idle').toLowerCase();
+  final historyState = _text(latestPrinterStatus, fallback: 'idle').toLowerCase();
+  if (activePrinterEPC.isNotEmpty || requestState == 'processing' || historyState == 'processing') {
+    return 'processing';
+  }
+  if (historyState == 'done' || requestState == 'done') {
+    return 'done';
+  }
+  if (historyState == 'error' || requestState == 'error') {
+    return 'error';
+  }
+  return 'idle';
+}
+
+String buildPrinterEventKey({
+  required String latestPrinterStatus,
+  required String latestPrinterEPC,
+  required String latestPrinterError,
+  required String printStatus,
+}) {
+  final state = derivePrinterState(
+    printStatus: printStatus,
+    latestPrinterStatus: latestPrinterStatus,
+    activePrinterEPC: '',
+  );
+  if (state == 'idle' || state == 'processing') {
+    return '';
+  }
+  final epc = _text(latestPrinterEPC);
+  final err = _text(latestPrinterError);
+  return '$state|$epc|$err';
+}
+
+String buildPrinterEventMessage({
+  required String printStatus,
+  required String latestPrinterStatus,
+  required String latestPrinterEPC,
+  required String latestPrinterError,
+}) {
+  final state = derivePrinterState(
+    printStatus: printStatus,
+    latestPrinterStatus: latestPrinterStatus,
+    activePrinterEPC: '',
+  );
+  final epc = _text(latestPrinterEPC);
+  final err = _text(latestPrinterError);
+  if (state == 'done') {
+    return epc.isEmpty ? 'Printer: print qildi' : 'Printer: print qildi • $epc';
+  }
+  if (state == 'error') {
+    if (err.isNotEmpty) {
+      return 'Printer: failed • $err';
+    }
+    return epc.isEmpty ? 'Printer: failed' : 'Printer: failed • $epc';
+  }
+  return '';
 }
 
 class MobileItem {
