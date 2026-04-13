@@ -336,6 +336,8 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
   final TextEditingController _itemSearchController = TextEditingController();
   final TextEditingController _warehouseSearchController =
       TextEditingController();
+  final FocusNode _itemSearchFocusNode = FocusNode();
+  final FocusNode _warehouseSearchFocusNode = FocusNode();
   StreamSubscription<String>? _streamSubscription;
   int _streamGeneration = 0;
   int _selectedSection = 0;
@@ -364,12 +366,13 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
     super.initState();
     _itemSearchController.addListener(_scheduleItemSearch);
     _warehouseSearchController.addListener(_scheduleWarehouseSearch);
+    _itemSearchFocusNode.addListener(_handleSearchFocusChanged);
+    _warehouseSearchFocusNode.addListener(_handleSearchFocusChanged);
     _snapshot = MonitorSnapshot.empty().copyWithLatency(
       widget.server.latencyMs,
     );
     _startLiveStream();
     _startPingLoop();
-    unawaited(_loadItems());
   }
 
   @override
@@ -379,9 +382,18 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
     _pingTimer?.cancel();
     _itemSearchController.dispose();
     _warehouseSearchController.dispose();
+    _itemSearchFocusNode.dispose();
+    _warehouseSearchFocusNode.dispose();
     _stopLiveStream();
     _client.close();
     super.dispose();
+  }
+
+  void _handleSearchFocusChanged() {
+    if (!mounted) {
+      return;
+    }
+    setState(() {});
   }
 
   void _startLiveStream() {
@@ -624,8 +636,17 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
 
   void _scheduleItemSearch() {
     _itemSearchDebounce?.cancel();
+    final query = _itemSearchController.text.trim();
+    if (query.isEmpty) {
+      setState(() {
+        _items = const [];
+        _itemsLoading = false;
+        _itemsError = '';
+      });
+      return;
+    }
     _itemSearchDebounce = Timer(const Duration(milliseconds: 220), () {
-      unawaited(_loadItems(query: _itemSearchController.text));
+      unawaited(_loadItems(query: query));
     });
   }
 
@@ -634,11 +655,20 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
       return;
     }
     _warehouseSearchDebounce?.cancel();
+    final query = _warehouseSearchController.text.trim();
+    if (query.isEmpty) {
+      setState(() {
+        _warehouses = const [];
+        _warehousesLoading = false;
+        _warehousesError = '';
+      });
+      return;
+    }
     _warehouseSearchDebounce = Timer(const Duration(milliseconds: 220), () {
       unawaited(
         _loadWarehouses(
           itemCode: _selectedItem!.itemCode,
-          query: _warehouseSearchController.text,
+          query: query,
         ),
       );
     });
@@ -750,7 +780,9 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
       _selectedWarehouse = null;
       _warehouses = const [];
       _warehouseSearchController.clear();
+      _itemSearchController.clear();
     });
+    _itemSearchFocusNode.unfocus();
     await _loadWarehouses(itemCode: item.itemCode);
   }
 
@@ -1089,6 +1121,15 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
     final selectedProduct = _selectedItem;
     final selectedWarehouse = _selectedWarehouse;
     final batchRunning = _snapshot.batchActive;
+    final showItemSuggestions =
+        _itemSearchFocusNode.hasFocus &&
+        (_itemsLoading || _itemsError.isNotEmpty || _items.isNotEmpty);
+    final showWarehouseSuggestions =
+        selectedProduct != null &&
+        _warehouseSearchFocusNode.hasFocus &&
+        (_warehousesLoading ||
+            _warehousesError.isNotEmpty ||
+            _warehouses.isNotEmpty);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1163,51 +1204,55 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
         const SizedBox(height: 8),
         TextField(
           controller: _itemSearchController,
+          focusNode: _itemSearchFocusNode,
           decoration: const InputDecoration(
             labelText: 'Item qidirish',
             hintText: 'Masalan: tea, cotton, bag',
             prefixIcon: Icon(Icons.search_rounded),
           ),
         ),
-        const SizedBox(height: 10),
-        if (_itemsLoading)
-          const LinearProgressIndicator(minHeight: 2)
-        else if (_itemsError.isNotEmpty)
-          Text(
-            _itemsError,
-            style: theme.textTheme.bodySmall?.copyWith(color: scheme.error),
-          )
-        else if (_items.isEmpty)
-          Text(
-            'Item topilmadi.',
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: scheme.onSurfaceVariant,
-            ),
-          )
-        else
-          Column(
-            children: [
-              for (var i = 0; i < _items.length; i++) ...[
-                _ItemOptionTile(
-                  item: _items[i],
-                  selected: selectedProduct?.itemCode == _items[i].itemCode,
-                  onTap: batchRunning ? null : () => _selectItem(_items[i]),
-                ),
-                if (i != _items.length - 1)
-                  Divider(
-                    height: 1,
-                    indent: 52,
-                    endIndent: 0,
-                    color: scheme.outlineVariant.withValues(alpha: 0.8),
+        if (showItemSuggestions) ...[
+          const SizedBox(height: 10),
+          if (_itemsLoading)
+            const LinearProgressIndicator(minHeight: 2)
+          else if (_itemsError.isNotEmpty)
+            Text(
+              _itemsError,
+              style: theme.textTheme.bodySmall?.copyWith(color: scheme.error),
+            )
+          else if (_items.isEmpty)
+            Text(
+              'Item topilmadi.',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: scheme.onSurfaceVariant,
+              ),
+            )
+          else
+            Column(
+              children: [
+                for (var i = 0; i < _items.length; i++) ...[
+                  _ItemOptionTile(
+                    item: _items[i],
+                    selected: selectedProduct?.itemCode == _items[i].itemCode,
+                    onTap: batchRunning ? null : () => _selectItem(_items[i]),
                   ),
+                  if (i != _items.length - 1)
+                    Divider(
+                      height: 1,
+                      indent: 38,
+                      endIndent: 0,
+                      color: scheme.outlineVariant.withValues(alpha: 0.8),
+                    ),
+                ],
               ],
-            ],
-          ),
+            ),
+        ],
         const SizedBox(height: 28),
         _SectionLabel(title: 'Warehouse selection', subtitle: ''),
         const SizedBox(height: 8),
         TextField(
           controller: _warehouseSearchController,
+          focusNode: _warehouseSearchFocusNode,
           enabled: selectedProduct != null && !batchRunning,
           decoration: const InputDecoration(
             labelText: 'Warehouse qidirish',
@@ -1215,54 +1260,59 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
             prefixIcon: Icon(Icons.warehouse_outlined),
           ),
         ),
-        const SizedBox(height: 10),
-        if (_warehousesLoading)
-          const LinearProgressIndicator(minHeight: 2)
-        else if (_warehousesError.isNotEmpty)
-          Text(
-            _warehousesError,
-            style: theme.textTheme.bodySmall?.copyWith(color: scheme.error),
-          )
-        else if (selectedProduct == null)
+        if (selectedProduct == null) ...[
+          const SizedBox(height: 10),
           Text(
             'Item tanlang, keyin warehouse chiqadi.',
             style: theme.textTheme.bodySmall?.copyWith(
               color: scheme.onSurfaceVariant,
             ),
-          )
-        else if (_warehouses.isEmpty)
-          Text(
-            'Warehouse topilmadi.',
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: scheme.onSurfaceVariant,
-            ),
-          )
-        else
-          Column(
-            children: [
-              for (var i = 0; i < _warehouses.length; i++) ...[
-                _WarehouseOptionTile(
-                  warehouse: _warehouses[i],
-                  selected:
-                      selectedWarehouse?.warehouse == _warehouses[i].warehouse,
-                  onTap: batchRunning
-                      ? null
-                      : () {
-                          setState(() {
-                            _selectedWarehouse = _warehouses[i];
-                          });
-                        },
-                ),
-                if (i != _warehouses.length - 1)
-                  Divider(
-                    height: 1,
-                    indent: 52,
-                    endIndent: 0,
-                    color: scheme.outlineVariant.withValues(alpha: 0.8),
-                  ),
-              ],
-            ],
           ),
+        ] else if (showWarehouseSuggestions) ...[
+          const SizedBox(height: 10),
+          if (_warehousesLoading)
+            const LinearProgressIndicator(minHeight: 2)
+          else if (_warehousesError.isNotEmpty)
+            Text(
+              _warehousesError,
+              style: theme.textTheme.bodySmall?.copyWith(color: scheme.error),
+            )
+          else if (_warehouses.isEmpty)
+            Text(
+              'Warehouse topilmadi.',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: scheme.onSurfaceVariant,
+              ),
+            )
+          else
+            Column(
+              children: [
+                for (var i = 0; i < _warehouses.length; i++) ...[
+                  _WarehouseOptionTile(
+                    warehouse: _warehouses[i],
+                    selected:
+                        selectedWarehouse?.warehouse == _warehouses[i].warehouse,
+                    onTap: batchRunning
+                        ? null
+                        : () {
+                            setState(() {
+                              _selectedWarehouse = _warehouses[i];
+                              _warehouseSearchController.clear();
+                            });
+                            _warehouseSearchFocusNode.unfocus();
+                          },
+                  ),
+                  if (i != _warehouses.length - 1)
+                    Divider(
+                      height: 1,
+                      indent: 38,
+                      endIndent: 0,
+                      color: scheme.outlineVariant.withValues(alpha: 0.8),
+                    ),
+                ],
+              ],
+            ),
+        ],
         const SizedBox(height: 28),
         _SectionLabel(title: 'Batch actions', subtitle: ''),
         const SizedBox(height: 8),
@@ -1307,8 +1357,14 @@ class _DashboardScrollView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final bottomInset = MediaQuery.paddingOf(context).bottom;
     return ListView(
-      padding: const EdgeInsets.fromLTRB(18, 8, 18, 24),
+      padding: EdgeInsets.fromLTRB(
+        18,
+        8,
+        18,
+        24 + bottomInset + 96,
+      ),
       children: [child],
     );
   }
@@ -1621,39 +1677,47 @@ class _ItemOptionTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    return Material(
-      color: selected
-          ? scheme.secondaryContainer.withValues(alpha: 0.45)
-          : Colors.transparent,
-      borderRadius: BorderRadius.circular(16),
-      child: ListTile(
-        onTap: onTap,
-        contentPadding: const EdgeInsets.symmetric(horizontal: 0, vertical: 2),
-        leading: Icon(
-          Icons.inventory_2_outlined,
-          color: selected ? scheme.onSecondaryContainer : scheme.primary,
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 10),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(
+              Icons.inventory_2_outlined,
+              color: selected ? scheme.primary : scheme.onSurfaceVariant,
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    item.itemCode,
+                    style: theme.textTheme.bodyLarge?.copyWith(
+                      fontWeight: FontWeight.w700,
+                      color: selected ? scheme.primary : scheme.onSurface,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    item.itemName,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            if (selected)
+              Icon(
+                Icons.check_rounded,
+                color: scheme.primary,
+              ),
+          ],
         ),
-        title: Text(
-          item.itemCode,
-          style: theme.textTheme.bodyLarge?.copyWith(
-            fontWeight: FontWeight.w700,
-            color: selected ? scheme.onSecondaryContainer : scheme.onSurface,
-          ),
-        ),
-        subtitle: Text(
-          item.itemName,
-          style: theme.textTheme.bodySmall?.copyWith(
-            color: selected
-                ? scheme.onSecondaryContainer
-                : scheme.onSurfaceVariant,
-          ),
-        ),
-        trailing: selected
-            ? Icon(
-                Icons.check_circle_rounded,
-                color: scheme.onSecondaryContainer,
-              )
-            : Icon(Icons.circle_outlined, color: scheme.outline),
       ),
     );
   }
@@ -1674,39 +1738,47 @@ class _WarehouseOptionTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    return Material(
-      color: selected
-          ? scheme.secondaryContainer.withValues(alpha: 0.45)
-          : Colors.transparent,
-      borderRadius: BorderRadius.circular(16),
-      child: ListTile(
-        onTap: onTap,
-        contentPadding: const EdgeInsets.symmetric(horizontal: 0, vertical: 2),
-        leading: Icon(
-          Icons.warehouse_outlined,
-          color: selected ? scheme.onSecondaryContainer : scheme.primary,
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 10),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(
+              Icons.warehouse_outlined,
+              color: selected ? scheme.primary : scheme.onSurfaceVariant,
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    warehouse.warehouse,
+                    style: theme.textTheme.bodyLarge?.copyWith(
+                      fontWeight: FontWeight.w700,
+                      color: selected ? scheme.primary : scheme.onSurface,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    warehouse.caption,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            if (selected)
+              Icon(
+                Icons.check_rounded,
+                color: scheme.primary,
+              ),
+          ],
         ),
-        title: Text(
-          warehouse.warehouse,
-          style: theme.textTheme.bodyLarge?.copyWith(
-            fontWeight: FontWeight.w700,
-            color: selected ? scheme.onSecondaryContainer : scheme.onSurface,
-          ),
-        ),
-        subtitle: Text(
-          warehouse.caption,
-          style: theme.textTheme.bodySmall?.copyWith(
-            color: selected
-                ? scheme.onSecondaryContainer
-                : scheme.onSurfaceVariant,
-          ),
-        ),
-        trailing: selected
-            ? Icon(
-                Icons.check_circle_rounded,
-                color: scheme.onSecondaryContainer,
-              )
-            : Icon(Icons.circle_outlined, color: scheme.outline),
       ),
     );
   }

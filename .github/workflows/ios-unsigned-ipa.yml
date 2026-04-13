@@ -1,0 +1,56 @@
+name: iOS Unsigned IPA
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build-ios-unsigned-ipa:
+    runs-on: macos-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Show Flutter version
+        run: flutter --version
+
+      - name: Install Dart and Flutter dependencies
+        run: flutter pub get
+
+      - name: Install CocoaPods dependencies
+        working-directory: ios
+        run: pod install --repo-update
+
+      - name: Build unsigned iOS app bundle
+        run: flutter build ios --release --no-codesign
+
+      - name: Package unsigned IPA
+        run: |
+          set -euxo pipefail
+          APP_PATH="build/ios/iphoneos/Runner.app"
+          IPA_DIR="build/ios/ipa"
+          IPA_PATH="$IPA_DIR/hard_con_v2-unsigned.ipa"
+
+          test -d "$APP_PATH"
+          rm -rf "$IPA_DIR"
+          mkdir -p "$IPA_DIR/Payload"
+          cp -R "$APP_PATH" "$IPA_DIR/Payload/"
+
+          cd "$IPA_DIR"
+          /usr/bin/zip -r "hard_con_v2-unsigned.ipa" Payload
+          ls -lh hard_con_v2-unsigned.ipa
+
+      - name: Upload unsigned IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hard_con_v2-unsigned-ipa
+          path: build/ios/ipa/hard_con_v2-unsigned.ipa
+          if-no-files-found: error
