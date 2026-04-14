@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:device_preview/device_preview.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -18,8 +19,13 @@ const _manualProbeTimeout = Duration(seconds: 2);
 const _udpDiscoveryTimeout = Duration(milliseconds: 450);
 const _fallbackProbeTimeout = Duration(milliseconds: 240);
 const _fallbackProbeConcurrency = 24;
+const _directProbePorts = <int>[8081, 8082, 8083];
+const _enableAutomaticSubnetSweep = false;
 const _lastServerKey = 'last_server_base_url';
+const _cachedServersKey = 'cached_servers_v1';
 const _defaultWifiServerAddress = 'http://gscale.local:8081';
+const _bonjourDiscoveryTimeout = Duration(milliseconds: 350);
+const _bonjourDiscoveryChannel = MethodChannel('gscale/bonjour');
 const _configuredApiBaseUrl = String.fromEnvironment(
   'API_BASE_URL',
   defaultValue: _defaultWifiServerAddress,
@@ -75,8 +81,43 @@ class GScaleMobileApp extends StatefulWidget {
 class _GScaleMobileAppState extends State<GScaleMobileApp> {
   DiscoveredServer? _selectedServer;
 
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_bootstrapSelectedServer());
+  }
+
+  Future<void> _bootstrapSelectedServer() async {
+    final preferredEndpoint = await loadLastUsedServer();
+    final configuredEndpoint = parseServerEndpoint(_configuredApiBaseUrl);
+    final endpoint =
+        (preferredEndpoint != null &&
+            !_shouldSkipDiscoveryHost(preferredEndpoint.host))
+        ? preferredEndpoint
+        : ((configuredEndpoint != null &&
+                  !_shouldSkipDiscoveryHost(configuredEndpoint.host))
+              ? configuredEndpoint
+              : null);
+    if (endpoint == null || !mounted) {
+      return;
+    }
+    setState(() {
+      _selectedServer = DiscoveredServer(
+        endpoint: endpoint,
+        handshake: ServerHandshake(
+          serverName: endpoint.host,
+          displayName: 'Direct server',
+          role: 'operator',
+          serverRef: 'bootstrap',
+        ),
+        latencyMs: 1,
+      );
+    });
+  }
+
   Future<void> _openServer(DiscoveredServer server) async {
     await saveLastUsedServer(server.endpoint);
+    await saveCachedDiscoveredServers([server]);
     if (!mounted) {
       return;
     }
@@ -217,6 +258,11 @@ class _ServerPickerPageState extends State<ServerPickerPage> {
   @override
   void initState() {
     super.initState();
+    final seeded = buildSeededDiscoveryResult();
+    if (seeded.servers.isNotEmpty) {
+      _result = seeded;
+    }
+    unawaited(_loadCachedServers());
     unawaited(_scan());
     _refreshTimer = Timer.periodic(const Duration(seconds: 3), (_) {
       unawaited(_scan());
@@ -230,6 +276,16 @@ class _ServerPickerPageState extends State<ServerPickerPage> {
     super.dispose();
   }
 
+  Future<void> _loadCachedServers() async {
+    final cached = await loadCachedDiscoveredServers();
+    if (!mounted || cached.isEmpty) {
+      return;
+    }
+    setState(() {
+      _result = DiscoveryResult(servers: cached, candidateCount: cached.length);
+    });
+  }
+
   Future<void> _scan() async {
     if (_scanning) {
       return;
@@ -241,17 +297,35 @@ class _ServerPickerPageState extends State<ServerPickerPage> {
 
     try {
       final preferredEndpoint = await loadLastUsedServer();
-      final result = await discoverServers(
+      final seededResult = buildSeededDiscoveryResult(
+        preferredEndpoint: preferredEndpoint,
+      );
+      if (seededResult.servers.isNotEmpty &&
+          mounted &&
+          (_result == null || _result!.servers.isEmpty)) {
+        setState(() {
+          _result = seededResult;
+        });
+      }
+
+      final fastResultFuture = discoverServersFast(
         _client,
         preferredEndpoint: preferredEndpoint,
       );
+      final fastResult = await fastResultFuture;
       if (!mounted) {
         return;
       }
-
       setState(() {
-        _result = result;
+        if (fastResult.servers.isNotEmpty) {
+          _result = fastResult;
+        }
+        _scanning = false;
       });
+      if (fastResult.servers.isNotEmpty) {
+        unawaited(saveCachedDiscoveredServers(fastResult.servers));
+      }
+      unawaited(_finishBackgroundScan(preferredEndpoint));
     } catch (_) {
       if (!mounted) {
         return;
@@ -261,14 +335,27 @@ class _ServerPickerPageState extends State<ServerPickerPage> {
           servers: <DiscoveredServer>[],
           candidateCount: 0,
         );
+        _scanning = false;
       });
-    } finally {
-      if (mounted) {
-        setState(() {
-          _scanning = false;
-        });
-      }
     }
+  }
+
+  Future<void> _finishBackgroundScan(ServerEndpoint? preferredEndpoint) async {
+    try {
+      final result = await discoverServers(
+        _client,
+        preferredEndpoint: preferredEndpoint,
+      );
+      if (!mounted) {
+        return;
+      }
+      if (result.servers.isNotEmpty) {
+        setState(() {
+          _result = result;
+        });
+        await saveCachedDiscoveredServers(result.servers);
+      }
+    } catch (_) {}
   }
 
   Future<void> _openManualEntrySheet() async {
@@ -1934,6 +2021,12 @@ class _ItemPickerSheetState extends State<_ItemPickerSheet> {
   void initState() {
     super.initState();
     _controller = TextEditingController();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+      unawaited(_loadItems(query: ''));
+    });
   }
 
   @override
@@ -1945,31 +2038,13 @@ class _ItemPickerSheetState extends State<_ItemPickerSheet> {
 
   void _scheduleSearch() {
     _debounce?.cancel();
-    if (_controller.text.trim().isEmpty) {
-      setState(() {
-        _items = const [];
-        _loading = false;
-        _error = '';
-      });
-      return;
-    }
     _debounce = Timer(const Duration(milliseconds: 220), () {
       unawaited(_loadItems());
     });
   }
 
-  Future<void> _loadItems() async {
-    final query = _controller.text.trim();
-    if (query.isEmpty) {
-      if (mounted) {
-        setState(() {
-          _items = const [];
-          _loading = false;
-          _error = '';
-        });
-      }
-      return;
-    }
+  Future<void> _loadItems({String? query}) async {
+    final search = (query ?? _controller.text).trim();
     if (!mounted) {
       return;
     }
@@ -1978,7 +2053,7 @@ class _ItemPickerSheetState extends State<_ItemPickerSheet> {
       _error = '';
     });
     try {
-      final items = await widget.fetchItems(query: query);
+      final items = await widget.fetchItems(query: search);
       if (!mounted) {
         return;
       }
@@ -2143,6 +2218,12 @@ class _WarehousePickerSheetState extends State<_WarehousePickerSheet> {
   void initState() {
     super.initState();
     _controller = TextEditingController();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+      unawaited(_loadWarehouses(query: ''));
+    });
   }
 
   @override
@@ -2154,31 +2235,13 @@ class _WarehousePickerSheetState extends State<_WarehousePickerSheet> {
 
   void _scheduleSearch() {
     _debounce?.cancel();
-    if (_controller.text.trim().isEmpty) {
-      setState(() {
-        _warehouses = const [];
-        _loading = false;
-        _error = '';
-      });
-      return;
-    }
     _debounce = Timer(const Duration(milliseconds: 220), () {
       unawaited(_loadWarehouses());
     });
   }
 
-  Future<void> _loadWarehouses() async {
-    final query = _controller.text.trim();
-    if (query.isEmpty) {
-      if (mounted) {
-        setState(() {
-          _warehouses = const [];
-          _loading = false;
-          _error = '';
-        });
-      }
-      return;
-    }
+  Future<void> _loadWarehouses({String? query}) async {
+    final search = (query ?? _controller.text).trim();
     if (!mounted) {
       return;
     }
@@ -2189,7 +2252,7 @@ class _WarehousePickerSheetState extends State<_WarehousePickerSheet> {
     try {
       final warehouses = await widget.fetchWarehouses(
         itemCode: widget.itemCode,
-        query: query,
+        query: search,
       );
       if (!mounted) {
         return;
@@ -3193,38 +3256,91 @@ class ServerHandshake {
   final String serverRef;
 }
 
+Future<DiscoveryResult> discoverServersFast(
+  http.Client client, {
+  ServerEndpoint? preferredEndpoint,
+}) async {
+  final candidates = await _loadCandidateHosts();
+  final configuredEndpoint = parseServerEndpoint(_configuredApiBaseUrl);
+  final probeTargets = _buildDirectProbeTargets(
+    candidates: candidates,
+    preferredEndpoint: preferredEndpoint,
+    configuredEndpoint: configuredEndpoint,
+  );
+
+  final results = await _probeServers(
+    client,
+    probeTargets,
+    timeout: _fastProbeTimeout,
+    concurrency: 8,
+  );
+  results.sort((left, right) {
+    if (preferredEndpoint != null) {
+      final leftPreferred = left.endpoint.baseUrl == preferredEndpoint.baseUrl;
+      final rightPreferred =
+          right.endpoint.baseUrl == preferredEndpoint.baseUrl;
+      if (leftPreferred != rightPreferred) {
+        return leftPreferred ? -1 : 1;
+      }
+    }
+    final latencyCmp = left.latencyMs.compareTo(right.latencyMs);
+    if (latencyCmp != 0) {
+      return latencyCmp;
+    }
+    return left.endpoint.baseUrl.compareTo(right.endpoint.baseUrl);
+  });
+
+  return DiscoveryResult(servers: results, candidateCount: probeTargets.length);
+}
+
+DiscoveryResult buildSeededDiscoveryResult({
+  ServerEndpoint? preferredEndpoint,
+}) {
+  final configuredEndpoint = parseServerEndpoint(_configuredApiBaseUrl);
+  final servers = <DiscoveredServer>[];
+  final seen = <String>{};
+
+  void addSeed(ServerEndpoint? endpoint, String displayName) {
+    if (endpoint == null || _shouldSkipDiscoveryHost(endpoint.host)) {
+      return;
+    }
+    if (!seen.add(endpoint.baseUrl)) {
+      return;
+    }
+    servers.add(
+      DiscoveredServer(
+        endpoint: endpoint,
+        handshake: ServerHandshake(
+          serverName: endpoint.host,
+          displayName: displayName,
+          role: 'operator',
+          serverRef: 'seed',
+        ),
+        latencyMs: 1,
+      ),
+    );
+  }
+
+  addSeed(preferredEndpoint, 'Recent server');
+  addSeed(configuredEndpoint, 'Configured server');
+  return DiscoveryResult(servers: servers, candidateCount: servers.length);
+}
+
 Future<DiscoveryResult> discoverServers(
   http.Client client, {
   ServerEndpoint? preferredEndpoint,
 }) async {
   final announcementsFuture = _loadDiscoveryAnnouncements();
+  final bonjourServersFuture = _loadBonjourDiscoveredServers();
   final candidates = await _loadCandidateHosts();
+  final configuredEndpoint = parseServerEndpoint(_configuredApiBaseUrl);
   final resultsByKey = <String, DiscoveredServer>{};
-  final probeTargets = <ServerEndpoint>[];
-  final seenBaseUrls = <String>{};
-
-  void addTarget(ServerEndpoint endpoint) {
-    if (seenBaseUrls.add(endpoint.baseUrl)) {
-      probeTargets.add(endpoint);
-    }
-  }
-
-  if (preferredEndpoint != null &&
-      !_shouldSkipDiscoveryHost(preferredEndpoint.host)) {
-    addTarget(preferredEndpoint);
-  }
-  for (final host in candidates) {
-    if (_shouldSkipDiscoveryHost(host)) {
-      continue;
-    }
-    addTarget(
-      ServerEndpoint(
-        host: host,
-        port: _defaultApiPort,
-        baseUrl: 'http://$host:$_defaultApiPort',
-      ),
-    );
-  }
+  final probeTargets = _buildDirectProbeTargets(
+    candidates: candidates,
+    preferredEndpoint: preferredEndpoint,
+    configuredEndpoint: configuredEndpoint,
+  );
+  final seenBaseUrls = probeTargets.map((endpoint) => endpoint.baseUrl).toSet();
 
   var candidateCount = probeTargets.length;
   final directScanned = await _probeServers(
@@ -3254,6 +3370,11 @@ Future<DiscoveryResult> discoverServers(
   }
 
   if (resultsByKey.isEmpty) {
+    final bonjourServers = await bonjourServersFuture;
+    _mergeDiscoveredServers(resultsByKey, bonjourServers);
+  }
+
+  if (_enableAutomaticSubnetSweep && resultsByKey.isEmpty) {
     final subnetHosts = await _loadSubnetCandidateHosts();
     final fallbackTargets = <ServerEndpoint>[];
     for (final host in subnetHosts) {
@@ -3295,6 +3416,57 @@ Future<DiscoveryResult> discoverServers(
   });
 
   return DiscoveryResult(servers: results, candidateCount: candidateCount);
+}
+
+List<ServerEndpoint> _buildDirectProbeTargets({
+  required List<String> candidates,
+  ServerEndpoint? preferredEndpoint,
+  ServerEndpoint? configuredEndpoint,
+}) {
+  final probeTargets = <ServerEndpoint>[];
+  final seenBaseUrls = <String>{};
+
+  void addTarget(ServerEndpoint endpoint) {
+    if (seenBaseUrls.add(endpoint.baseUrl)) {
+      probeTargets.add(endpoint);
+    }
+  }
+
+  void addLikelyTargets(String host, {int? preferredPort}) {
+    final ports = <int>{};
+    if (preferredPort != null) {
+      ports.add(preferredPort);
+    }
+    ports.addAll(_directProbePorts);
+    for (final port in ports) {
+      addTarget(
+        ServerEndpoint(host: host, port: port, baseUrl: 'http://$host:$port'),
+      );
+    }
+  }
+
+  if (preferredEndpoint != null &&
+      !_shouldSkipDiscoveryHost(preferredEndpoint.host)) {
+    addLikelyTargets(
+      preferredEndpoint.host,
+      preferredPort: preferredEndpoint.port,
+    );
+  }
+  if (configuredEndpoint != null &&
+      !_shouldSkipDiscoveryHost(configuredEndpoint.host)) {
+    addLikelyTargets(
+      configuredEndpoint.host,
+      preferredPort: configuredEndpoint.port,
+    );
+  }
+  for (final host in candidates) {
+    if (_shouldSkipDiscoveryHost(host)) {
+      continue;
+    }
+    addLikelyTargets(host);
+  }
+
+  return probeTargets;
 }
 
 Future<List<String>> _loadCandidateHosts() async {
@@ -3380,6 +3552,7 @@ Future<DiscoveredServer?> probeServer(
   Duration timeout = _fastProbeTimeout,
 }) async {
   final stopwatch = Stopwatch()..start();
+  Map<String, dynamic>? handshakeJson;
 
   try {
     final handshakeResponse = await client
@@ -3391,14 +3564,22 @@ Future<DiscoveredServer?> probeServer(
       if (_text(json['service']) != 'mobileapi') {
         return null;
       }
-      stopwatch.stop();
-      return DiscoveredServer(
-        endpoint: endpoint,
-        handshake: ServerHandshake.fromJson(json),
-        latencyMs: stopwatch.elapsedMilliseconds,
-      );
+      handshakeJson = json;
     }
+  } catch (_) {
+    // Fall through to /healthz so transient handshake hiccups don't hide the server.
+  }
 
+  if (handshakeJson != null) {
+    stopwatch.stop();
+    return DiscoveredServer(
+      endpoint: endpoint,
+      handshake: ServerHandshake.fromJson(handshakeJson),
+      latencyMs: stopwatch.elapsedMilliseconds,
+    );
+  }
+
+  try {
     final healthResponse = await client
         .get(Uri.parse('${endpoint.baseUrl}/healthz'))
         .timeout(timeout);
@@ -3425,6 +3606,62 @@ Future<DiscoveredServer?> probeServer(
   } catch (_) {
     return null;
   }
+}
+
+Future<List<DiscoveredServer>> _loadBonjourDiscoveredServers() async {
+  if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) {
+    return const [];
+  }
+  try {
+    final raw = await _bonjourDiscoveryChannel.invokeMethod<List<Object?>>(
+      'discoverBonjourServices',
+      {'timeout_ms': _bonjourDiscoveryTimeout.inMilliseconds},
+    );
+    if (raw == null || raw.isEmpty) {
+      return const [];
+    }
+
+    final out = <DiscoveredServer>[];
+    for (final item in raw) {
+      final json = (item as Map?)?.cast<Object?, Object?>();
+      if (json == null) {
+        continue;
+      }
+      final host = _text(json['host']);
+      if (host.isEmpty || _shouldSkipDiscoveryHost(host)) {
+        continue;
+      }
+      final port = _intValue(json['http_port']) ?? _defaultApiPort;
+      out.add(
+        DiscoveredServer(
+          endpoint: ServerEndpoint(
+            host: host,
+            port: port,
+            baseUrl: 'http://$host:$port',
+          ),
+          handshake: ServerHandshake(
+            serverName: _text(json['server_name'], fallback: host),
+            displayName: _text(json['display_name'], fallback: 'Operator'),
+            role: _text(json['role'], fallback: 'operator'),
+            serverRef: _text(json['server_ref']),
+          ),
+          latencyMs:
+              _intValue(json['latency_ms']) ??
+              _fallbackProbeTimeout.inMilliseconds,
+        ),
+      );
+    }
+    return out;
+  } catch (_) {
+    return const [];
+  }
+}
+
+int? _intValue(Object? value) {
+  if (value is int) {
+    return value;
+  }
+  return int.tryParse(_text(value));
 }
 
 ServerEndpoint? parseServerEndpoint(String raw) {
@@ -3480,6 +3717,98 @@ Future<ServerEndpoint?> loadLastUsedServer() async {
     return null;
   }
   return endpoint;
+}
+
+Future<void> saveCachedDiscoveredServers(List<DiscoveredServer> servers) async {
+  final prefs = await SharedPreferences.getInstance();
+  final payload = servers
+      .take(8)
+      .map(
+        (server) => {
+          'host': server.endpoint.host,
+          'port': server.endpoint.port,
+          'base_url': server.endpoint.baseUrl,
+          'server_name': server.handshake.serverName,
+          'display_name': server.handshake.displayName,
+          'role': server.handshake.role,
+          'server_ref': server.handshake.serverRef,
+          'latency_ms': server.latencyMs,
+        },
+      )
+      .toList(growable: false);
+  await prefs.setString(_cachedServersKey, jsonEncode(payload));
+}
+
+Future<List<DiscoveredServer>> loadCachedDiscoveredServers() async {
+  final prefs = await SharedPreferences.getInstance();
+  final value = prefs.getString(_cachedServersKey);
+  if (value == null || value.trim().isEmpty) {
+    final endpoint = await loadLastUsedServer();
+    if (endpoint == null) {
+      return const [];
+    }
+    return [
+      DiscoveredServer(
+        endpoint: endpoint,
+        handshake: ServerHandshake(
+          serverName: endpoint.host,
+          displayName: 'Recent server',
+          role: 'operator',
+          serverRef: 'cached',
+        ),
+        latencyMs: 1,
+      ),
+    ];
+  }
+
+  try {
+    final payload = jsonDecode(value) as List<dynamic>;
+    final out = <DiscoveredServer>[];
+    for (final item in payload) {
+      final json = (item as Map?)?.cast<String, dynamic>();
+      if (json == null) {
+        continue;
+      }
+      final endpoint = parseServerEndpoint(_text(json['base_url']));
+      if (endpoint == null || _shouldSkipDiscoveryHost(endpoint.host)) {
+        continue;
+      }
+      out.add(
+        DiscoveredServer(
+          endpoint: endpoint,
+          handshake: ServerHandshake(
+            serverName: _text(json['server_name'], fallback: endpoint.host),
+            displayName: _text(json['display_name'], fallback: 'Operator'),
+            role: _text(json['role'], fallback: 'operator'),
+            serverRef: _text(json['server_ref'], fallback: 'cached'),
+          ),
+          latencyMs: _intValue(json['latency_ms']) ?? 1,
+        ),
+      );
+    }
+    if (out.isNotEmpty) {
+      return out;
+    }
+  } catch (_) {
+    // Ignore cache parse issues and rebuild below from last endpoint.
+  }
+
+  final endpoint = await loadLastUsedServer();
+  if (endpoint == null) {
+    return const [];
+  }
+  return [
+    DiscoveredServer(
+      endpoint: endpoint,
+      handshake: ServerHandshake(
+        serverName: endpoint.host,
+        displayName: 'Recent server',
+        role: 'operator',
+        serverRef: 'cached',
+      ),
+      latencyMs: 1,
+    ),
+  ];
 }
 
 bool _shouldSkipDiscoveryHost(String host) {

@@ -25,6 +25,7 @@ class DiscoveryAnnouncement {
 const _discoveryProbeV1 = 'GSCALE_DISCOVER_V1';
 const _discoveryProbeAttempts = 3;
 const _discoveryProbeRetryDelay = Duration(milliseconds: 120);
+const _discoverySettleDelay = Duration(milliseconds: 45);
 
 Future<List<String>> collectCandidateHosts() async {
   return const ['gscale.local'];
@@ -74,16 +75,27 @@ Future<List<DiscoveryAnnouncement>> discoverAnnouncements({
   required int port,
   required Duration timeout,
 }) async {
-  final socket = await RawDatagramSocket.bind(
-    InternetAddress.anyIPv4,
-    0,
-    reuseAddress: true,
-  );
+  RawDatagramSocket socket;
+  try {
+    socket = await RawDatagramSocket.bind(
+      InternetAddress.anyIPv4,
+      port,
+      reuseAddress: true,
+      reusePort: true,
+    );
+  } catch (_) {
+    socket = await RawDatagramSocket.bind(
+      InternetAddress.anyIPv4,
+      0,
+      reuseAddress: true,
+    );
+  }
   socket.broadcastEnabled = true;
 
   final stopwatch = Stopwatch()..start();
   final results = <String, DiscoveryAnnouncement>{};
   final done = Completer<void>();
+  Timer? settleTimer;
   late final StreamSubscription<RawSocketEvent> sub;
 
   sub = socket.listen((event) {
@@ -120,6 +132,12 @@ Future<List<DiscoveryAnnouncement>> discoverAnnouncements({
     );
     final key = '${announcement.serverRef}|${announcement.serverName}|$host';
     results[key] = announcement;
+    settleTimer?.cancel();
+    settleTimer = Timer(_discoverySettleDelay, () {
+      if (!done.isCompleted) {
+        done.complete();
+      }
+    });
   });
 
   final targets = await _collectBroadcastTargets();
@@ -132,6 +150,7 @@ Future<List<DiscoveryAnnouncement>> discoverAnnouncements({
   unawaited(_sendDiscoveryProbes(socket, targets, packet, port));
 
   await done.future;
+  settleTimer?.cancel();
   await sub.cancel();
   socket.close();
   return results.values.toList();
