@@ -1393,6 +1393,8 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
         ],
         const SizedBox(height: 12),
         _MiniIconRow(icon: Icons.print_outlined, text: printerStatusText),
+        const SizedBox(height: 8),
+        _MiniIconRow(icon: Icons.scale_outlined, text: _snapshot.scaleConnectionLabel),
         const SizedBox(height: 28),
         _SectionLabel(title: 'Item selection', subtitle: ''),
         const SizedBox(height: 8),
@@ -2769,6 +2771,7 @@ class MonitorSnapshot {
   const MonitorSnapshot({
     required this.scaleValue,
     required this.scaleCaption,
+    required this.scaleConnectionLabel,
     required this.zebraValue,
     required this.zebraCaption,
     required this.batchValue,
@@ -2792,6 +2795,7 @@ class MonitorSnapshot {
     return const MonitorSnapshot(
       scaleValue: '--',
       scaleCaption: 'Live qty',
+      scaleConnectionLabel: 'Scale: kutyapti',
       zebraValue: 'Idle',
       zebraCaption: 'Printer state',
       batchValue: 'Stopped',
@@ -2825,6 +2829,11 @@ class MonitorSnapshot {
     final scaleWeight = scale['weight'];
     final scaleUnit = _text(scale['unit'], fallback: 'kg');
     final scaleStable = scale['stable'] == true ? 'stable' : 'live';
+    final scaleConnectionLabel = buildScaleConnectionLabel(
+      source: _text(scale['source']),
+      port: _text(scale['port']),
+      error: _text(scale['error']),
+    );
 
     final zebraVerify = _text(zebra['verify'], fallback: 'idle');
     final zebraAction = _text(zebra['action'], fallback: 'printer state');
@@ -2861,6 +2870,7 @@ class MonitorSnapshot {
     return MonitorSnapshot(
       scaleValue: scaleWeight == null ? '--' : '$scaleWeight $scaleUnit',
       scaleCaption: scaleStable,
+      scaleConnectionLabel: scaleConnectionLabel,
       zebraValue: zebraVerify.toUpperCase(),
       zebraCaption: zebraAction,
       batchValue: batchActive ? 'Active' : 'Stopped',
@@ -2909,6 +2919,7 @@ class MonitorSnapshot {
     return MonitorSnapshot(
       scaleValue: scaleValue,
       scaleCaption: scaleCaption,
+      scaleConnectionLabel: scaleConnectionLabel,
       zebraValue: zebraValue,
       zebraCaption: zebraCaption,
       batchValue: batch.active ? 'Active' : 'Stopped',
@@ -2931,6 +2942,7 @@ class MonitorSnapshot {
 
   final String scaleValue;
   final String scaleCaption;
+  final String scaleConnectionLabel;
   final String zebraValue;
   final String zebraCaption;
   final String batchValue;
@@ -2953,6 +2965,7 @@ class MonitorSnapshot {
     return MonitorSnapshot(
       scaleValue: scaleValue,
       scaleCaption: scaleCaption,
+      scaleConnectionLabel: scaleConnectionLabel,
       zebraValue: zebraValue,
       zebraCaption: zebraCaption,
       batchValue: batchValue,
@@ -3002,6 +3015,20 @@ String buildPrinterLabel({
     return 'Printer: kutyapti';
   }
   return 'Printer: kutyapti';
+}
+
+String buildScaleConnectionLabel({
+  required String source,
+  required String port,
+  required String error,
+}) {
+  if (error.trim().isNotEmpty) {
+    return 'Scale: kutyapti';
+  }
+  if (source.trim().isNotEmpty || port.trim().isNotEmpty) {
+    return 'Scale: connected';
+  }
+  return 'Scale: kutyapti';
 }
 
 String derivePrinterState({
