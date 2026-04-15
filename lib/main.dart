@@ -2795,7 +2795,7 @@ class MonitorSnapshot {
     return const MonitorSnapshot(
       scaleValue: '--',
       scaleCaption: 'Live qty',
-      scaleConnectionLabel: 'Scale: kutyapti',
+      scaleConnectionLabel: 'Scale: ulanmagan',
       zebraValue: 'Idle',
       zebraCaption: 'Printer state',
       batchValue: 'Stopped',
@@ -3029,12 +3029,12 @@ String buildScaleConnectionLabel({
   required String error,
 }) {
   if (error.trim().isNotEmpty) {
-    return 'Scale: kutyapti';
+    return 'Scale: ulanmagan';
   }
   if (source.trim().isNotEmpty || port.trim().isNotEmpty) {
-    return 'Scale: connected';
+    return 'Scale: ulangan';
   }
-  return 'Scale: kutyapti';
+  return 'Scale: ulanmagan';
 }
 
 String derivePrinterState({
