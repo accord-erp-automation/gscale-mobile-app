@@ -380,6 +380,7 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
   Timer? _warehouseSearchDebounce;
 
   bool _manualLoading = false;
+  bool _manualPrintLoading = false;
   bool _requestInFlight = false;
   bool _warehousesLoading = false;
   bool _batchActionLoading = false;
@@ -1107,9 +1108,6 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
       final tareKg = _babinaEnabled
           ? parsePositiveKg(_babinaWeightController.text)
           : null;
-      if (quantitySource == 'manual' && manualQtyKg == null) {
-        throw Exception("Manual kg ni to'g'ri kiriting");
-      }
       if (_babinaEnabled && tareKg == null) {
         throw Exception("Babina og'irligini kg da to'g'ri kiriting");
       }
@@ -1166,6 +1164,66 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
       setState(() {
         _batchActionLoading = false;
         _warehousesError = error.toString();
+      });
+    }
+  }
+
+  Future<void> _printManualBatch() async {
+    if (_manualPrintLoading || _batchActionLoading || _requestInFlight) {
+      return;
+    }
+    final manualQtyKg = parsePositiveKg(_manualQtyController.text);
+    if (manualQtyKg == null) {
+      setState(() {
+        _errorText = "Manual kg ni to'g'ri kiriting";
+      });
+      return;
+    }
+    if (!_snapshot.batchActive || _snapshot.batchQuantitySource != 'manual') {
+      setState(() {
+        _errorText = 'Avval manual batch start qiling';
+      });
+      return;
+    }
+
+    setState(() {
+      _manualPrintLoading = true;
+      _errorText = '';
+    });
+    try {
+      final response = await _client
+          .post(
+            _apiUri('/v1/mobile/batch/manual-print'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({'manual_qty_kg': manualQtyKg}),
+          )
+          .timeout(const Duration(seconds: 4));
+      if (response.statusCode < 200 || response.statusCode > 299) {
+        throw Exception('manual print ${response.statusCode}');
+      }
+      final payload = jsonDecode(response.body) as Map<String, dynamic>;
+      final batch =
+          (payload['batch'] as Map?)?.cast<String, dynamic>() ?? const {};
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        final updatedBatch = MobileBatchState.fromJson(batch);
+        _snapshot = _snapshot.copyWithBatch(updatedBatch);
+        _quantitySource = updatedBatch.quantitySource;
+        if (updatedBatch.manualQtyKg > 0) {
+          _manualQtyController.text = formatCompactKg(updatedBatch.manualQtyKg);
+        }
+        _manualPrintLoading = false;
+      });
+      unawaited(_refreshArchive());
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _manualPrintLoading = false;
+        _errorText = error.toString();
       });
     }
   }
@@ -1946,9 +2004,6 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
         selectedQuantitySource == 'manual' &&
         _manualQtyController.text.trim().isNotEmpty &&
         manualQtyKg == null;
-    final manualQtyMissing =
-        selectedQuantitySource == 'manual' &&
-        _manualQtyController.text.trim().isEmpty;
     final babinaKg = _babinaEnabled
         ? parsePositiveKg(_babinaWeightController.text)
         : null;
@@ -2154,24 +2209,66 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
         ),
         if (selectedQuantitySource == 'manual') ...[
           const SizedBox(height: 10),
-          TextField(
-            controller: _manualQtyController,
-            enabled: !_batchActionLoading,
-            keyboardType: const TextInputType.numberWithOptions(decimal: true),
-            inputFormatters: [
-              FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]')),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _manualQtyController,
+                  enabled: !_batchActionLoading && !_manualPrintLoading,
+                  keyboardType: const TextInputType.numberWithOptions(
+                    decimal: true,
+                  ),
+                  inputFormatters: [
+                    FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]')),
+                  ],
+                  decoration: InputDecoration(
+                    labelText: 'Manual brutto kg',
+                    suffixText: 'kg',
+                    hintText: '5',
+                    errorText: manualQtyInvalid ? 'Masalan: 5 yoki 4.22' : null,
+                    border: const OutlineInputBorder(),
+                  ),
+                  onChanged: (_) => setState(() {}),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: SizedBox(
+                  height: 56,
+                  width: 56,
+                  child: IconButton.filled(
+                    tooltip: 'Print',
+                    onPressed:
+                        batchRunning &&
+                            selectedQuantitySource == 'manual' &&
+                            manualQtyKg != null &&
+                            !_manualPrintLoading &&
+                            !_batchActionLoading
+                        ? _printManualBatch
+                        : null,
+                    icon: _manualPrintLoading
+                        ? const SizedBox(
+                            height: 20,
+                            width: 20,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.play_arrow_rounded),
+                  ),
+                ),
+              ),
             ],
-            decoration: InputDecoration(
-              labelText: 'Manual brutto kg',
-              suffixText: 'kg',
-              hintText: '5',
-              errorText: manualQtyInvalid || manualQtyMissing
-                  ? 'Masalan: 5 yoki 4.22'
-                  : null,
-              border: const OutlineInputBorder(),
-            ),
-            onChanged: (_) => setState(() {}),
           ),
+          if (_manualPrintLoading) ...[
+            const SizedBox(height: 6),
+            Text(
+              'Print yuborilmoqda...',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: scheme.onSurfaceVariant,
+              ),
+            ),
+          ],
         ],
         const SizedBox(height: 10),
         Container(
@@ -2296,8 +2393,6 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
                         (defaultMode
                             ? defaultWarehouse.isEmpty
                             : selectedWarehouse == null) ||
-                        (selectedQuantitySource == 'manual' &&
-                            manualQtyKg == null) ||
                         (_babinaEnabled && babinaKg == null) ||
                         batchRunning ||
                         _batchActionLoading
