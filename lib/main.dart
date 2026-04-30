@@ -369,6 +369,8 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
   final TextEditingController _erpApiSecretController = TextEditingController();
   final TextEditingController _defaultWarehouseController =
       TextEditingController();
+  final TextEditingController _babinaWeightController = TextEditingController();
+  final TextEditingController _manualQtyController = TextEditingController();
   final TextEditingController _warehouseSearchController =
       TextEditingController();
   final FocusNode _warehouseSearchFocusNode = FocusNode();
@@ -398,6 +400,10 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
   String _erpConfiguredUrl = '';
   String _warehouseMode = 'manual';
   String _defaultWarehouse = '';
+  String _batchPrintMode = 'rfid';
+  String _batchPrinter = 'zebra';
+  String _quantitySource = 'scale';
+  bool _babinaEnabled = false;
   MonitorSnapshot _snapshot = MonitorSnapshot.empty();
   List<MobileWarehouse> _warehouses = const [];
   List<MobileArchiveSession> _archiveSessions = const [];
@@ -429,6 +435,8 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
     _erpApiKeyController.dispose();
     _erpApiSecretController.dispose();
     _defaultWarehouseController.dispose();
+    _babinaWeightController.dispose();
+    _manualQtyController.dispose();
     _warehouseSearchController.dispose();
     _warehouseSearchFocusNode.dispose();
     _stopLiveStream();
@@ -721,6 +729,25 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
         _selectedWarehouse = MobileWarehouse(
           warehouse: snapshot.batchWarehouse,
         );
+      }
+      if (snapshot.batchPrintMode.isNotEmpty) {
+        _batchPrintMode = snapshot.batchPrintMode;
+      }
+      if (snapshot.batchPrinter.isNotEmpty) {
+        _batchPrinter = snapshot.batchPrinter;
+      }
+      if (snapshot.batchActive) {
+        _quantitySource = snapshot.batchQuantitySource;
+        if (_manualQtyController.text.trim().isEmpty &&
+            snapshot.batchManualQtyKg > 0) {
+          _manualQtyController.text = formatCompactKg(
+            snapshot.batchManualQtyKg,
+          );
+        }
+        _babinaEnabled = snapshot.batchTareEnabled;
+        if (snapshot.batchTareKg > 0) {
+          _babinaWeightController.text = formatCompactKg(snapshot.batchTareKg);
+        }
       }
     }
     if (!mounted) {
@@ -1071,6 +1098,21 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
       _warehousesError = '';
     });
     try {
+      final printer = normalizePrinterChoice(_batchPrinter);
+      final printMode = printer == 'godex' ? 'label' : _batchPrintMode;
+      final quantitySource = normalizeQuantitySource(_quantitySource);
+      final manualQtyKg = quantitySource == 'manual'
+          ? parsePositiveKg(_manualQtyController.text)
+          : null;
+      final tareKg = _babinaEnabled
+          ? parsePositiveKg(_babinaWeightController.text)
+          : null;
+      if (quantitySource == 'manual' && manualQtyKg == null) {
+        throw Exception("Manual kg ni to'g'ri kiriting");
+      }
+      if (_babinaEnabled && tareKg == null) {
+        throw Exception("Babina og'irligini kg da to'g'ri kiriting");
+      }
       final response = await _client
           .post(
             _apiUri('/v1/mobile/batch/start'),
@@ -1079,6 +1121,12 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
               'item_code': item.itemCode,
               'item_name': item.itemName,
               'warehouse': warehouse,
+              'print_mode': printMode,
+              'printer': printer,
+              'quantity_source': quantitySource,
+              'manual_qty_kg': manualQtyKg ?? 0,
+              'tare_enabled': _babinaEnabled,
+              'tare_kg': tareKg ?? 0,
             }),
           )
           .timeout(const Duration(seconds: 4));
@@ -1092,7 +1140,22 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
         return;
       }
       setState(() {
-        _snapshot = _snapshot.copyWithBatch(MobileBatchState.fromJson(batch));
+        final startedBatch = MobileBatchState.fromJson(batch);
+        _snapshot = _snapshot.copyWithBatch(startedBatch);
+        if (startedBatch.printMode.isNotEmpty) {
+          _batchPrintMode = startedBatch.printMode;
+        }
+        if (startedBatch.printer.isNotEmpty) {
+          _batchPrinter = startedBatch.printer;
+        }
+        _quantitySource = startedBatch.quantitySource;
+        if (startedBatch.manualQtyKg > 0) {
+          _manualQtyController.text = formatCompactKg(startedBatch.manualQtyKg);
+        }
+        _babinaEnabled = startedBatch.tareEnabled;
+        if (startedBatch.tareKg > 0) {
+          _babinaWeightController.text = formatCompactKg(startedBatch.tareKg);
+        }
         _batchActionLoading = false;
       });
       unawaited(_refreshArchive());
@@ -1870,6 +1933,31 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
     final batchRunning = _snapshot.batchActive;
     final defaultWarehouse = _currentDefaultWarehouse;
     final defaultMode = _warehouseMode == 'default';
+    final modeLocked = batchRunning || _batchActionLoading;
+    final printerLocked = batchRunning || _batchActionLoading;
+    final selectedPrinter = normalizePrinterChoice(_batchPrinter);
+    final selectedQuantitySource = normalizeQuantitySource(_quantitySource);
+    final batchPrintMode = _batchPrintMode == 'label' ? 'Label only' : 'RFID';
+    final batchPrinterLabel = displayPrinterChoice(selectedPrinter);
+    final manualQtyKg = selectedQuantitySource == 'manual'
+        ? parsePositiveKg(_manualQtyController.text)
+        : null;
+    final manualQtyInvalid =
+        selectedQuantitySource == 'manual' &&
+        _manualQtyController.text.trim().isNotEmpty &&
+        manualQtyKg == null;
+    final manualQtyMissing =
+        selectedQuantitySource == 'manual' &&
+        _manualQtyController.text.trim().isEmpty;
+    final babinaKg = _babinaEnabled
+        ? parsePositiveKg(_babinaWeightController.text)
+        : null;
+    final babinaInvalid =
+        _babinaEnabled &&
+        _babinaWeightController.text.trim().isNotEmpty &&
+        babinaKg == null;
+    final babinaMissing =
+        _babinaEnabled && _babinaWeightController.text.trim().isEmpty;
     final printerStatusText = _printerStatusOverride.isNotEmpty
         ? _printerStatusOverride
         : _snapshot.printerLabel;
@@ -1906,6 +1994,32 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
             text:
                 '${_snapshot.batchItemName.isEmpty ? _snapshot.batchItemCode : _snapshot.batchItemName} • ${_snapshot.batchWarehouse}',
           ),
+          const SizedBox(height: 8),
+          _MiniIconRow(
+            icon: Icons.local_printshop_outlined,
+            text: 'Print type: $batchPrintMode',
+          ),
+          const SizedBox(height: 8),
+          _MiniIconRow(
+            icon: Icons.precision_manufacturing_outlined,
+            text: 'Printer: $batchPrinterLabel',
+          ),
+          const SizedBox(height: 8),
+          _MiniIconRow(
+            icon: _snapshot.batchQuantitySource == 'manual'
+                ? Icons.edit_note_rounded
+                : Icons.scale_outlined,
+            text: _snapshot.batchQuantitySource == 'manual'
+                ? 'KG: manual ${formatCompactKg(_snapshot.batchManualQtyKg)} kg'
+                : 'KG: tarozidan',
+          ),
+          if (_snapshot.batchTareEnabled && _snapshot.batchTareKg > 0) ...[
+            const SizedBox(height: 8),
+            _MiniIconRow(
+              icon: Icons.functions_rounded,
+              text: 'Babina: ${formatCompactKg(_snapshot.batchTareKg)} kg',
+            ),
+          ],
         ],
         const SizedBox(height: 12),
         _MiniIconRow(icon: Icons.print_outlined, text: printerStatusText),
@@ -1965,6 +2079,194 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
         const SizedBox(height: 28),
         _SectionLabel(title: 'Batch actions', subtitle: ''),
         const SizedBox(height: 8),
+        IgnorePointer(
+          ignoring: printerLocked,
+          child: Opacity(
+            opacity: printerLocked ? 0.6 : 1,
+            child: SegmentedButton<String>(
+              segments: const [
+                ButtonSegment<String>(
+                  value: 'zebra',
+                  label: Text('Zebra'),
+                  icon: Icon(Icons.memory_rounded),
+                ),
+                ButtonSegment<String>(
+                  value: 'godex',
+                  label: Text('GoDEX'),
+                  icon: Icon(Icons.local_printshop_outlined),
+                ),
+              ],
+              selected: <String>{selectedPrinter},
+              onSelectionChanged: (selection) {
+                if (selection.isEmpty) {
+                  return;
+                }
+                final nextPrinter = normalizePrinterChoice(selection.first);
+                if (nextPrinter == selectedPrinter) {
+                  return;
+                }
+                setState(() {
+                  _batchPrinter = nextPrinter;
+                  if (nextPrinter == 'godex') {
+                    _batchPrintMode = 'label';
+                  }
+                });
+              },
+            ),
+          ),
+        ),
+        if (selectedPrinter == 'godex') ...[
+          const SizedBox(height: 8),
+          _MiniIconRow(
+            icon: Icons.info_outline_rounded,
+            text: 'GoDEX label-only chop qiladi, RFID encode qilmaydi.',
+          ),
+        ],
+        const SizedBox(height: 10),
+        IgnorePointer(
+          ignoring: printerLocked,
+          child: Opacity(
+            opacity: printerLocked ? 0.6 : 1,
+            child: SegmentedButton<String>(
+              segments: const [
+                ButtonSegment<String>(
+                  value: 'scale',
+                  label: Text('Scale kg'),
+                  icon: Icon(Icons.scale_outlined),
+                ),
+                ButtonSegment<String>(
+                  value: 'manual',
+                  label: Text('Manual kg'),
+                  icon: Icon(Icons.edit_note_rounded),
+                ),
+              ],
+              selected: <String>{selectedQuantitySource},
+              onSelectionChanged: (selection) {
+                if (selection.isEmpty) {
+                  return;
+                }
+                setState(() {
+                  _quantitySource = normalizeQuantitySource(selection.first);
+                });
+              },
+            ),
+          ),
+        ),
+        if (selectedQuantitySource == 'manual') ...[
+          const SizedBox(height: 10),
+          TextField(
+            controller: _manualQtyController,
+            enabled: !_batchActionLoading,
+            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            inputFormatters: [
+              FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]')),
+            ],
+            decoration: InputDecoration(
+              labelText: 'Manual brutto kg',
+              suffixText: 'kg',
+              hintText: '5',
+              errorText: manualQtyInvalid || manualQtyMissing
+                  ? 'Masalan: 5 yoki 4.22'
+                  : null,
+              border: const OutlineInputBorder(),
+            ),
+            onChanged: (_) => setState(() {}),
+          ),
+        ],
+        const SizedBox(height: 10),
+        Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: scheme.surfaceContainerLow,
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(color: scheme.outlineVariant),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              CheckboxListTile(
+                value: _babinaEnabled,
+                contentPadding: EdgeInsets.zero,
+                controlAffinity: ListTileControlAffinity.leading,
+                title: const Text("Babina og'irligini ayirish"),
+                subtitle: const Text('Netto = brutto - babina kg'),
+                onChanged: printerLocked
+                    ? null
+                    : (value) {
+                        setState(() {
+                          _babinaEnabled = value ?? false;
+                        });
+                      },
+              ),
+              if (_babinaEnabled) ...[
+                const SizedBox(height: 8),
+                TextField(
+                  controller: _babinaWeightController,
+                  enabled: !printerLocked,
+                  keyboardType: const TextInputType.numberWithOptions(
+                    decimal: true,
+                  ),
+                  inputFormatters: [
+                    FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]')),
+                  ],
+                  decoration: InputDecoration(
+                    labelText: "Babina og'irligi",
+                    suffixText: 'kg',
+                    hintText: '0.78',
+                    errorText: babinaInvalid || babinaMissing
+                        ? 'Masalan: 0.78'
+                        : null,
+                    border: const OutlineInputBorder(),
+                  ),
+                  onChanged: (_) => setState(() {}),
+                ),
+                if (babinaKg != null) ...[
+                  const SizedBox(height: 8),
+                  _MiniIconRow(
+                    icon: Icons.functions_rounded,
+                    text:
+                        'Label: BRUTTO = ${selectedQuantitySource == 'manual' ? 'manual kg' : 'tarozi kg'}, NETTO = BRUTTO - ${formatCompactKg(babinaKg)} kg',
+                  ),
+                ],
+              ],
+            ],
+          ),
+        ),
+        const SizedBox(height: 10),
+        IgnorePointer(
+          ignoring: modeLocked || selectedPrinter == 'godex',
+          child: Opacity(
+            opacity: modeLocked || selectedPrinter == 'godex' ? 0.6 : 1,
+            child: SegmentedButton<String>(
+              segments: const [
+                ButtonSegment<String>(
+                  value: 'rfid',
+                  label: Text('RFID'),
+                  icon: Icon(Icons.memory_rounded),
+                ),
+                ButtonSegment<String>(
+                  value: 'label',
+                  label: Text('Label only'),
+                  icon: Icon(Icons.local_printshop_outlined),
+                ),
+              ],
+              selected: <String>{_batchPrintMode},
+              onSelectionChanged: (selection) {
+                if (selection.isEmpty) {
+                  return;
+                }
+                final nextMode = selection.first;
+                if (nextMode == _batchPrintMode) {
+                  return;
+                }
+                setState(() {
+                  _batchPrintMode = nextMode;
+                });
+              },
+            ),
+          ),
+        ),
+        const SizedBox(height: 10),
         Row(
           children: [
             Expanded(
@@ -1994,6 +2296,9 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
                         (defaultMode
                             ? defaultWarehouse.isEmpty
                             : selectedWarehouse == null) ||
+                        (selectedQuantitySource == 'manual' &&
+                            manualQtyKg == null) ||
+                        (_babinaEnabled && babinaKg == null) ||
                         batchRunning ||
                         _batchActionLoading
                     ? null
@@ -3320,6 +3625,12 @@ class MonitorSnapshot {
     required this.batchItemCode,
     required this.batchItemName,
     required this.batchWarehouse,
+    required this.batchPrintMode,
+    required this.batchPrinter,
+    required this.batchQuantitySource,
+    required this.batchManualQtyKg,
+    required this.batchTareEnabled,
+    required this.batchTareKg,
     required this.latencyMs,
   });
 
@@ -3344,6 +3655,12 @@ class MonitorSnapshot {
       batchItemCode: '',
       batchItemName: '',
       batchWarehouse: '',
+      batchPrintMode: 'rfid',
+      batchPrinter: 'zebra',
+      batchQuantitySource: 'scale',
+      batchManualQtyKg: 0,
+      batchTareEnabled: false,
+      batchTareKg: 0,
       latencyMs: 0,
     );
   }
@@ -3374,6 +3691,14 @@ class MonitorSnapshot {
     final batchItemCode = _text(batch['item_code']);
     final batchItem = _text(batch['item_name'], fallback: batchItemCode);
     final batchWarehouse = _text(batch['warehouse']);
+    final batchPrintMode = _text(batch['print_mode']);
+    final batchPrinter = normalizePrinterChoice(_text(batch['printer']));
+    final batchQuantitySource = normalizeQuantitySource(
+      _text(batch['quantity_source']),
+    );
+    final batchManualQtyKg = (batch['manual_qty_kg'] as num?)?.toDouble() ?? 0;
+    final batchTareEnabled = batch['tare'] == true;
+    final batchTareKg = (batch['tare_kg'] as num?)?.toDouble() ?? 0;
 
     final printStatus = _text(printRequest['status'], fallback: 'idle');
     final printerConnected = printer['ok'] == true;
@@ -3444,6 +3769,12 @@ class MonitorSnapshot {
       batchItemCode: batchItemCode,
       batchItemName: batchItem,
       batchWarehouse: batchWarehouse,
+      batchPrintMode: batchPrintMode,
+      batchPrinter: batchPrinter,
+      batchQuantitySource: batchQuantitySource,
+      batchManualQtyKg: batchManualQtyKg,
+      batchTareEnabled: batchTareEnabled,
+      batchTareKg: batchTareKg,
       latencyMs: 0,
     );
   }
@@ -3470,6 +3801,18 @@ class MonitorSnapshot {
       batchItemCode: batch.itemCode,
       batchItemName: itemName,
       batchWarehouse: batch.warehouse,
+      batchPrintMode: batch.active
+          ? (batch.printMode.isNotEmpty ? batch.printMode : batchPrintMode)
+          : batchPrintMode,
+      batchPrinter: batch.active
+          ? (batch.printer.isNotEmpty ? batch.printer : batchPrinter)
+          : batchPrinter,
+      batchQuantitySource: batch.active
+          ? batch.quantitySource
+          : batchQuantitySource,
+      batchManualQtyKg: batch.active ? batch.manualQtyKg : batchManualQtyKg,
+      batchTareEnabled: batch.active ? batch.tareEnabled : batchTareEnabled,
+      batchTareKg: batch.active ? batch.tareKg : batchTareKg,
       latencyMs: latencyMs,
     );
   }
@@ -3493,6 +3836,12 @@ class MonitorSnapshot {
   final String batchItemCode;
   final String batchItemName;
   final String batchWarehouse;
+  final String batchPrintMode;
+  final String batchPrinter;
+  final String batchQuantitySource;
+  final double batchManualQtyKg;
+  final bool batchTareEnabled;
+  final double batchTareKg;
   final int latencyMs;
 
   MonitorSnapshot copyWithLatency(int latencyMs) {
@@ -3516,6 +3865,12 @@ class MonitorSnapshot {
       batchItemCode: batchItemCode,
       batchItemName: batchItemName,
       batchWarehouse: batchWarehouse,
+      batchPrintMode: batchPrintMode,
+      batchPrinter: batchPrinter,
+      batchQuantitySource: batchQuantitySource,
+      batchManualQtyKg: batchManualQtyKg,
+      batchTareEnabled: batchTareEnabled,
+      batchTareKg: batchTareKg,
       latencyMs: latencyMs,
     );
   }
@@ -3539,7 +3894,6 @@ String buildPrinterLabel({
     fallback: 'idle',
   ).toLowerCase();
   final epc = _text(latestPrinterEPC, fallback: activePrinterEPC);
-  final err = _text(latestPrinterError);
 
   if (activePrinterEPC.isNotEmpty ||
       requestState == 'processing' ||
@@ -3553,6 +3907,51 @@ String buildPrinterLabel({
     return 'Printer: ulangan';
   }
   return 'Printer: ulangan';
+}
+
+String normalizePrinterChoice(String printer) {
+  switch (printer.trim().toLowerCase()) {
+    case 'godex':
+    case 'go-dex':
+    case 'g500':
+      return 'godex';
+    case 'zebra':
+    case 'zpl':
+    case 'rfid':
+    default:
+      return 'zebra';
+  }
+}
+
+String displayPrinterChoice(String printer) {
+  return normalizePrinterChoice(printer) == 'godex' ? 'GoDEX' : 'Zebra';
+}
+
+String normalizeQuantitySource(String source) {
+  return source.trim().toLowerCase() == 'manual' ? 'manual' : 'scale';
+}
+
+double? parsePositiveKg(String value) {
+  final normalized = value.trim().replaceAll(',', '.');
+  if (normalized.isEmpty) {
+    return null;
+  }
+  final parsed = double.tryParse(normalized);
+  if (parsed == null || parsed <= 0) {
+    return null;
+  }
+  return parsed;
+}
+
+String formatCompactKg(double value) {
+  var text = value.toStringAsFixed(3);
+  while (text.contains('.') && text.endsWith('0')) {
+    text = text.substring(0, text.length - 1);
+  }
+  if (text.endsWith('.')) {
+    text = text.substring(0, text.length - 1);
+  }
+  return text;
 }
 
 String buildScaleConnectionLabel({
@@ -3691,6 +4090,12 @@ class MobileBatchState {
     required this.itemCode,
     required this.itemName,
     required this.warehouse,
+    required this.printMode,
+    required this.printer,
+    required this.quantitySource,
+    required this.manualQtyKg,
+    required this.tareEnabled,
+    required this.tareKg,
   });
 
   factory MobileBatchState.fromJson(Map<String, dynamic> json) {
@@ -3699,6 +4104,12 @@ class MobileBatchState {
       itemCode: _text(json['item_code']),
       itemName: _text(json['item_name']),
       warehouse: _text(json['warehouse']),
+      printMode: _text(json['print_mode']),
+      printer: normalizePrinterChoice(_text(json['printer'])),
+      quantitySource: normalizeQuantitySource(_text(json['quantity_source'])),
+      manualQtyKg: (json['manual_qty_kg'] as num?)?.toDouble() ?? 0,
+      tareEnabled: json['tare'] == true,
+      tareKg: (json['tare_kg'] as num?)?.toDouble() ?? 0,
     );
   }
 
@@ -3706,8 +4117,16 @@ class MobileBatchState {
   final String itemCode;
   final String itemName;
   final String warehouse;
+  final String printMode;
+  final String printer;
+  final String quantitySource;
+  final double manualQtyKg;
+  final bool tareEnabled;
+  final double tareKg;
 
   String get displayItemName => itemName.isEmpty ? itemCode : itemName;
+  String get displayPrintMode => printMode.isEmpty ? 'rfid' : printMode;
+  String get displayPrinter => displayPrinterChoice(printer);
 }
 
 class MobileArchivePrintEntry {
