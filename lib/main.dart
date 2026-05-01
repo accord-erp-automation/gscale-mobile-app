@@ -795,6 +795,12 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
     }
   }
 
+  void _resetERPSetupEditors() {
+    _erpUrlController.text = _erpConfiguredUrl;
+    _erpApiKeyController.clear();
+    _erpApiSecretController.clear();
+  }
+
   String get _currentDefaultWarehouse {
     final controllerValue = _defaultWarehouseController.text.trim();
     if (controllerValue.isNotEmpty) {
@@ -1648,9 +1654,7 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
                     : () {
                         setState(() {
                           if (!_erpSetupExpanded) {
-                            if (_erpUrlController.text.trim().isEmpty) {
-                              _erpUrlController.text = _erpConfiguredUrl;
-                            }
+                            _resetERPSetupEditors();
                           }
                           _erpSetupExpanded = !_erpSetupExpanded;
                         });
