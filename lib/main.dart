@@ -27,6 +27,7 @@ const _cachedServersKey = 'cached_servers_v1';
 const _defaultWifiServerAddress = 'http://gscale.local:39117';
 const _bonjourDiscoveryTimeout = Duration(milliseconds: 350);
 const _bonjourDiscoveryChannel = MethodChannel('gscale/bonjour');
+const _minManualPrintKg = 0.100;
 const _configuredApiBaseUrl = String.fromEnvironment(
   'API_BASE_URL',
   defaultValue: _defaultWifiServerAddress,
@@ -739,12 +740,6 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
       }
       if (snapshot.batchActive) {
         _quantitySource = snapshot.batchQuantitySource;
-        if (_manualQtyController.text.trim().isEmpty &&
-            snapshot.batchManualQtyKg > 0) {
-          _manualQtyController.text = formatCompactKg(
-            snapshot.batchManualQtyKg,
-          );
-        }
         _babinaEnabled = snapshot.batchTareEnabled;
         if (snapshot.batchTareKg > 0) {
           _babinaWeightController.text = formatCompactKg(snapshot.batchTareKg);
@@ -1147,9 +1142,6 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
           _batchPrinter = startedBatch.printer;
         }
         _quantitySource = startedBatch.quantitySource;
-        if (startedBatch.manualQtyKg > 0) {
-          _manualQtyController.text = formatCompactKg(startedBatch.manualQtyKg);
-        }
         _babinaEnabled = startedBatch.tareEnabled;
         if (startedBatch.tareKg > 0) {
           _babinaWeightController.text = formatCompactKg(startedBatch.tareKg);
@@ -1173,7 +1165,11 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
       return;
     }
     final manualQtyKg = parsePositiveKg(_manualQtyController.text);
-    if (manualQtyKg == null) {
+    if (!canTriggerManualPrint(
+      qtyText: _manualQtyController.text,
+      babinaEnabled: _babinaEnabled,
+      babinaText: _babinaWeightController.text,
+    )) {
       setState(() {
         _errorText = "Manual kg ni to'g'ri kiriting";
       });
@@ -1211,9 +1207,6 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
         final updatedBatch = MobileBatchState.fromJson(batch);
         _snapshot = _snapshot.copyWithBatch(updatedBatch);
         _quantitySource = updatedBatch.quantitySource;
-        if (updatedBatch.manualQtyKg > 0) {
-          _manualQtyController.text = formatCompactKg(updatedBatch.manualQtyKg);
-        }
         _manualPrintLoading = false;
       });
       unawaited(_refreshArchive());
@@ -2000,6 +1993,11 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
     final manualQtyKg = selectedQuantitySource == 'manual'
         ? parsePositiveKg(_manualQtyController.text)
         : null;
+    final manualPrintReady = canTriggerManualPrint(
+      qtyText: _manualQtyController.text,
+      babinaEnabled: _babinaEnabled,
+      babinaText: _babinaWeightController.text,
+    );
     final manualQtyInvalid =
         selectedQuantitySource == 'manual' &&
         _manualQtyController.text.trim().isNotEmpty &&
@@ -2243,7 +2241,7 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
                     onPressed:
                         batchRunning &&
                             selectedQuantitySource == 'manual' &&
-                            manualQtyKg != null &&
+                            manualPrintReady &&
                             !_manualPrintLoading &&
                             !_batchActionLoading
                         ? _printManualBatch
@@ -4036,6 +4034,23 @@ double? parsePositiveKg(String value) {
     return null;
   }
   return parsed;
+}
+
+bool canTriggerManualPrint({
+  required String qtyText,
+  required bool babinaEnabled,
+  required String babinaText,
+}) {
+  final manualQtyKg = parsePositiveKg(qtyText);
+  if (manualQtyKg == null) {
+    return false;
+  }
+  final double? babinaKg = babinaEnabled ? parsePositiveKg(babinaText) : null;
+  if (babinaEnabled && babinaKg == null) {
+    return false;
+  }
+  final netQty = manualQtyKg - (babinaKg ?? 0);
+  return manualQtyKg > (babinaKg ?? 0) && netQty >= _minManualPrintKg;
 }
 
 String formatCompactKg(double value) {

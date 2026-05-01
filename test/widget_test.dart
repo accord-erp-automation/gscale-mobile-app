@@ -56,4 +56,35 @@ void main() {
     expect(snapshot.batchTareEnabled, isTrue);
     expect(snapshot.batchTareKg, 0.78);
   });
+
+  test('manual print helper disables blank and undersized values', () {
+    expect(
+      canTriggerManualPrint(qtyText: '', babinaEnabled: false, babinaText: ''),
+      isFalse,
+    );
+    expect(
+      canTriggerManualPrint(
+        qtyText: '0.05',
+        babinaEnabled: false,
+        babinaText: '',
+      ),
+      isFalse,
+    );
+    expect(
+      canTriggerManualPrint(
+        qtyText: '0.78',
+        babinaEnabled: true,
+        babinaText: '0.78',
+      ),
+      isFalse,
+    );
+    expect(
+      canTriggerManualPrint(
+        qtyText: '5',
+        babinaEnabled: true,
+        babinaText: '0.78',
+      ),
+      isTrue,
+    );
+  });
 }
