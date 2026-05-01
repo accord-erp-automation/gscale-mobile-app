@@ -2119,77 +2119,80 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
           ],
         ],
         const SizedBox(height: 28),
-        Container(
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            color: scheme.surfaceContainerLow,
-            borderRadius: BorderRadius.circular(18),
-            border: Border.all(color: scheme.outlineVariant),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      'Babina',
-                      style: theme.textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                  ),
-                  SegmentedButton<bool>(
-                    segments: const [
-                      ButtonSegment<bool>(
-                        value: false,
-                        label: Text("Yo'q"),
-                        icon: Icon(Icons.close_rounded),
-                      ),
-                      ButtonSegment<bool>(
-                        value: true,
-                        label: Text('Bor'),
-                        icon: Icon(Icons.functions_rounded),
-                      ),
-                    ],
-                    selected: <bool>{_babinaEnabled},
-                    onSelectionChanged: printerLocked
-                        ? null
-                        : (selection) {
-                            if (selection.isEmpty) {
-                              return;
-                            }
-                            setState(() {
-                              _babinaEnabled = selection.first;
-                            });
-                          },
-                  ),
-                ],
-              ),
-              if (_babinaEnabled) ...[
-                const SizedBox(height: 10),
-                TextField(
-                  controller: _babinaWeightController,
-                  enabled: !printerLocked,
-                  keyboardType: const TextInputType.numberWithOptions(
-                    decimal: true,
-                  ),
-                  inputFormatters: [
-                    FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]')),
-                  ],
-                  decoration: InputDecoration(
-                    labelText: 'Babina',
-                    suffixText: 'kg',
-                    hintText: '0.78',
-                    errorText: babinaInvalid ? 'Masalan: 0.78' : null,
-                    border: const OutlineInputBorder(),
-                  ),
-                  onChanged: (_) => setState(() {}),
-                ),
-              ],
-            ],
+        Text(
+          'Babina',
+          style: theme.textTheme.titleMedium?.copyWith(
+            fontWeight: FontWeight.w700,
           ),
         ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            SegmentedButton<bool>(
+              segments: const [
+                ButtonSegment<bool>(
+                  value: false,
+                  label: Text("Yo'q"),
+                  icon: Icon(Icons.close_rounded),
+                ),
+                ButtonSegment<bool>(
+                  value: true,
+                  label: Text('Bor'),
+                  icon: Icon(Icons.functions_rounded),
+                ),
+              ],
+              selected: <bool>{_babinaEnabled},
+              onSelectionChanged: printerLocked
+                  ? null
+                  : (selection) {
+                      if (selection.isEmpty) {
+                        return;
+                      }
+                      setState(() {
+                        _babinaEnabled = selection.first;
+                      });
+                    },
+            ),
+          ],
+        ),
+        if (_babinaEnabled) ...[
+          const SizedBox(height: 10),
+          TextField(
+            controller: _babinaWeightController,
+            enabled: !printerLocked,
+            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            inputFormatters: [
+              FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]')),
+            ],
+            maxLines: 1,
+            minLines: 1,
+            textAlignVertical: TextAlignVertical.center,
+            decoration: InputDecoration(
+              labelText: 'Babina',
+              suffixText: 'kg',
+              hintText: '0.78',
+              errorText: babinaInvalid ? 'Masalan: 0.78' : null,
+              filled: true,
+              fillColor: scheme.surfaceContainerLow,
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 16,
+                vertical: 18,
+              ),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(16),
+              ),
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(16),
+                borderSide: BorderSide(color: scheme.outlineVariant),
+              ),
+              focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(16),
+                borderSide: BorderSide(color: scheme.primary, width: 1.4),
+              ),
+            ),
+            onChanged: (_) => setState(() {}),
+          ),
+        ],
         const SizedBox(height: 14),
         Container(
           decoration: BoxDecoration(
@@ -2305,6 +2308,9 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
                         inputFormatters: [
                           FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]')),
                         ],
+                        maxLines: 1,
+                        minLines: 1,
+                        textAlignVertical: TextAlignVertical.center,
                         decoration: InputDecoration(
                           labelText: 'Manual brutto kg',
                           suffixText: 'kg',
@@ -2312,7 +2318,28 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
                           errorText: manualQtyInvalid
                               ? 'Masalan: 5 yoki 4.22'
                               : null,
-                          border: const OutlineInputBorder(),
+                          filled: true,
+                          fillColor: scheme.surfaceContainerLow,
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 18,
+                          ),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(16),
+                          ),
+                          enabledBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(16),
+                            borderSide: BorderSide(
+                              color: scheme.outlineVariant,
+                            ),
+                          ),
+                          focusedBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(16),
+                            borderSide: BorderSide(
+                              color: scheme.primary,
+                              width: 1.4,
+                            ),
+                          ),
                         ),
                         onChanged: (_) => setState(() {}),
                       ),
@@ -2392,52 +2419,51 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
                 ),
               ),
               const SizedBox(height: 10),
-              Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton.icon(
-                      style: OutlinedButton.styleFrom(
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                      ),
-                      onPressed: batchRunning && !_batchActionLoading
-                          ? _stopBatch
-                          : null,
-                      icon: const Icon(Icons.stop_rounded),
-                      label: Text(
-                        _batchActionLoading ? 'Stopping...' : 'Batch Stop',
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: FilledButton.icon(
-                      style: FilledButton.styleFrom(
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                      ),
-                      onPressed:
-                          selectedProduct == null ||
-                              (defaultMode
-                                  ? defaultWarehouse.isEmpty
-                                  : selectedWarehouse == null) ||
-                              (_babinaEnabled && babinaKg == null) ||
-                              batchRunning ||
-                              _batchActionLoading
-                          ? null
-                          : _startBatch,
-                      icon: const Icon(Icons.play_arrow_rounded),
-                      label: Text(
-                        _batchActionLoading ? 'Starting...' : 'Batch Start',
-                      ),
-                    ),
-                  ),
-                ],
-              ),
             ],
           ),
+        ),
+        const SizedBox(height: 14),
+        Row(
+          children: [
+            Expanded(
+              child: OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                onPressed: batchRunning && !_batchActionLoading
+                    ? _stopBatch
+                    : null,
+                icon: const Icon(Icons.stop_rounded),
+                label: Text(_batchActionLoading ? 'Stopping...' : 'Batch Stop'),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: FilledButton.icon(
+                style: FilledButton.styleFrom(
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                onPressed:
+                    selectedProduct == null ||
+                        (defaultMode
+                            ? defaultWarehouse.isEmpty
+                            : selectedWarehouse == null) ||
+                        (_babinaEnabled && babinaKg == null) ||
+                        batchRunning ||
+                        _batchActionLoading
+                    ? null
+                    : _startBatch,
+                icon: const Icon(Icons.play_arrow_rounded),
+                label: Text(
+                  _batchActionLoading ? 'Starting...' : 'Batch Start',
+                ),
+              ),
+            ),
+          ],
         ),
       ],
     );
