@@ -2009,8 +2009,6 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
         _babinaEnabled &&
         _babinaWeightController.text.trim().isNotEmpty &&
         babinaKg == null;
-    final babinaMissing =
-        _babinaEnabled && _babinaWeightController.text.trim().isEmpty;
     final printerStatusText = _printerStatusOverride.isNotEmpty
         ? _printerStatusOverride
         : _snapshot.printerLabel;
@@ -2027,15 +2025,6 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
                 value: _snapshot.scaleValue,
                 caption: _snapshot.scaleCaption,
                 icon: Icons.scale_outlined,
-              ),
-            ),
-            const SizedBox(width: 20),
-            Expanded(
-              child: _MetricSummary(
-                title: 'Selected product',
-                value: selectedProduct?.itemCode ?? 'None',
-                caption: selectedProduct?.itemName ?? 'Product tanlanmagan',
-                icon: Icons.inventory_2_outlined,
               ),
             ),
           ],
@@ -2130,145 +2119,6 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
           ],
         ],
         const SizedBox(height: 28),
-        _SectionLabel(title: 'Batch actions', subtitle: ''),
-        const SizedBox(height: 8),
-        IgnorePointer(
-          ignoring: printerLocked,
-          child: Opacity(
-            opacity: printerLocked ? 0.6 : 1,
-            child: SegmentedButton<String>(
-              segments: const [
-                ButtonSegment<String>(
-                  value: 'zebra',
-                  label: Text('Zebra'),
-                  icon: Icon(Icons.memory_rounded),
-                ),
-                ButtonSegment<String>(
-                  value: 'godex',
-                  label: Text('GoDEX'),
-                  icon: Icon(Icons.local_printshop_outlined),
-                ),
-              ],
-              selected: <String>{selectedPrinter},
-              onSelectionChanged: (selection) {
-                if (selection.isEmpty) {
-                  return;
-                }
-                final nextPrinter = normalizePrinterChoice(selection.first);
-                if (nextPrinter == selectedPrinter) {
-                  return;
-                }
-                setState(() {
-                  _batchPrinter = nextPrinter;
-                  if (nextPrinter == 'godex') {
-                    _batchPrintMode = 'label';
-                  }
-                });
-              },
-            ),
-          ),
-        ),
-        if (selectedPrinter == 'godex') ...[
-          const SizedBox(height: 8),
-          _MiniIconRow(
-            icon: Icons.info_outline_rounded,
-            text: 'GoDEX label-only chop qiladi, RFID encode qilmaydi.',
-          ),
-        ],
-        const SizedBox(height: 10),
-        IgnorePointer(
-          ignoring: printerLocked,
-          child: Opacity(
-            opacity: printerLocked ? 0.6 : 1,
-            child: SegmentedButton<String>(
-              segments: const [
-                ButtonSegment<String>(
-                  value: 'scale',
-                  label: Text('Scale kg'),
-                  icon: Icon(Icons.scale_outlined),
-                ),
-                ButtonSegment<String>(
-                  value: 'manual',
-                  label: Text('Manual kg'),
-                  icon: Icon(Icons.edit_note_rounded),
-                ),
-              ],
-              selected: <String>{selectedQuantitySource},
-              onSelectionChanged: (selection) {
-                if (selection.isEmpty) {
-                  return;
-                }
-                setState(() {
-                  _quantitySource = normalizeQuantitySource(selection.first);
-                });
-              },
-            ),
-          ),
-        ),
-        if (selectedQuantitySource == 'manual') ...[
-          const SizedBox(height: 10),
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Expanded(
-                child: TextField(
-                  controller: _manualQtyController,
-                  enabled: !_batchActionLoading && !_manualPrintLoading,
-                  keyboardType: const TextInputType.numberWithOptions(
-                    decimal: true,
-                  ),
-                  inputFormatters: [
-                    FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]')),
-                  ],
-                  decoration: InputDecoration(
-                    labelText: 'Manual brutto kg',
-                    suffixText: 'kg',
-                    hintText: '5',
-                    errorText: manualQtyInvalid ? 'Masalan: 5 yoki 4.22' : null,
-                    border: const OutlineInputBorder(),
-                  ),
-                  onChanged: (_) => setState(() {}),
-                ),
-              ),
-              const SizedBox(width: 10),
-              Padding(
-                padding: const EdgeInsets.only(top: 2),
-                child: SizedBox(
-                  height: 56,
-                  width: 56,
-                  child: IconButton.filled(
-                    tooltip: 'Print',
-                    onPressed:
-                        batchRunning &&
-                            selectedQuantitySource == 'manual' &&
-                            manualPrintReady &&
-                            !_manualPrintLoading &&
-                            !_batchActionLoading
-                        ? _printManualBatch
-                        : null,
-                    icon: _manualPrintLoading
-                        ? const SizedBox(
-                            height: 20,
-                            width: 20,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Icon(Icons.play_arrow_rounded),
-                  ),
-                ),
-              ),
-            ],
-          ),
-          if (_manualPrintLoading) ...[
-            const SizedBox(height: 6),
-            Text(
-              'Print yuborilmoqda...',
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: scheme.onSurfaceVariant,
-              ),
-            ),
-          ],
-        ],
-        const SizedBox(height: 10),
         Container(
           padding: const EdgeInsets.all(12),
           decoration: BoxDecoration(
@@ -2279,22 +2129,45 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              CheckboxListTile(
-                value: _babinaEnabled,
-                contentPadding: EdgeInsets.zero,
-                controlAffinity: ListTileControlAffinity.leading,
-                title: const Text("Babina og'irligini ayirish"),
-                subtitle: const Text('Netto = brutto - babina kg'),
-                onChanged: printerLocked
-                    ? null
-                    : (value) {
-                        setState(() {
-                          _babinaEnabled = value ?? false;
-                        });
-                      },
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      'Babina',
+                      style: theme.textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                  SegmentedButton<bool>(
+                    segments: const [
+                      ButtonSegment<bool>(
+                        value: false,
+                        label: Text("Yo'q"),
+                        icon: Icon(Icons.close_rounded),
+                      ),
+                      ButtonSegment<bool>(
+                        value: true,
+                        label: Text('Bor'),
+                        icon: Icon(Icons.functions_rounded),
+                      ),
+                    ],
+                    selected: <bool>{_babinaEnabled},
+                    onSelectionChanged: printerLocked
+                        ? null
+                        : (selection) {
+                            if (selection.isEmpty) {
+                              return;
+                            }
+                            setState(() {
+                              _babinaEnabled = selection.first;
+                            });
+                          },
+                  ),
+                ],
               ),
               if (_babinaEnabled) ...[
-                const SizedBox(height: 8),
+                const SizedBox(height: 10),
                 TextField(
                   controller: _babinaWeightController,
                   enabled: !printerLocked,
@@ -2305,104 +2178,266 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
                     FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]')),
                   ],
                   decoration: InputDecoration(
-                    labelText: "Babina og'irligi",
+                    labelText: 'Babina',
                     suffixText: 'kg',
                     hintText: '0.78',
-                    errorText: babinaInvalid || babinaMissing
-                        ? 'Masalan: 0.78'
-                        : null,
+                    errorText: babinaInvalid ? 'Masalan: 0.78' : null,
                     border: const OutlineInputBorder(),
                   ),
                   onChanged: (_) => setState(() {}),
                 ),
-                if (babinaKg != null) ...[
-                  const SizedBox(height: 8),
-                  _MiniIconRow(
-                    icon: Icons.functions_rounded,
-                    text:
-                        'Label: BRUTTO = ${selectedQuantitySource == 'manual' ? 'manual kg' : 'tarozi kg'}, NETTO = BRUTTO - ${formatCompactKg(babinaKg)} kg',
-                  ),
-                ],
               ],
             ],
           ),
         ),
-        const SizedBox(height: 10),
-        IgnorePointer(
-          ignoring: modeLocked || selectedPrinter == 'godex',
-          child: Opacity(
-            opacity: modeLocked || selectedPrinter == 'godex' ? 0.6 : 1,
-            child: SegmentedButton<String>(
-              segments: const [
-                ButtonSegment<String>(
-                  value: 'rfid',
-                  label: Text('RFID'),
-                  icon: Icon(Icons.memory_rounded),
+        const SizedBox(height: 14),
+        Container(
+          decoration: BoxDecoration(
+            color: scheme.surfaceContainerLow,
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(color: scheme.outlineVariant),
+          ),
+          child: ExpansionTile(
+            key: const PageStorageKey<String>('batch_actions_tile'),
+            initiallyExpanded: false,
+            maintainState: true,
+            tilePadding: const EdgeInsets.symmetric(
+              horizontal: 14,
+              vertical: 6,
+            ),
+            childrenPadding: const EdgeInsets.fromLTRB(14, 0, 14, 14),
+            title: Text(
+              'Batch actions',
+              style: theme.textTheme.titleMedium?.copyWith(
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            children: [
+              IgnorePointer(
+                ignoring: printerLocked,
+                child: Opacity(
+                  opacity: printerLocked ? 0.6 : 1,
+                  child: SegmentedButton<String>(
+                    segments: const [
+                      ButtonSegment<String>(
+                        value: 'zebra',
+                        label: Text('Zebra'),
+                        icon: Icon(Icons.memory_rounded),
+                      ),
+                      ButtonSegment<String>(
+                        value: 'godex',
+                        label: Text('GoDEX'),
+                        icon: Icon(Icons.local_printshop_outlined),
+                      ),
+                    ],
+                    selected: <String>{selectedPrinter},
+                    onSelectionChanged: (selection) {
+                      if (selection.isEmpty) {
+                        return;
+                      }
+                      final nextPrinter = normalizePrinterChoice(
+                        selection.first,
+                      );
+                      if (nextPrinter == selectedPrinter) {
+                        return;
+                      }
+                      setState(() {
+                        _batchPrinter = nextPrinter;
+                        if (nextPrinter == 'godex') {
+                          _batchPrintMode = 'label';
+                        }
+                      });
+                    },
+                  ),
                 ),
-                ButtonSegment<String>(
-                  value: 'label',
-                  label: Text('Label only'),
-                  icon: Icon(Icons.local_printshop_outlined),
+              ),
+              if (selectedPrinter == 'godex') ...[
+                const SizedBox(height: 8),
+                _MiniIconRow(
+                  icon: Icons.info_outline_rounded,
+                  text: 'GoDEX label-only chop qiladi, RFID encode qilmaydi.',
                 ),
               ],
-              selected: <String>{_batchPrintMode},
-              onSelectionChanged: (selection) {
-                if (selection.isEmpty) {
-                  return;
-                }
-                final nextMode = selection.first;
-                if (nextMode == _batchPrintMode) {
-                  return;
-                }
-                setState(() {
-                  _batchPrintMode = nextMode;
-                });
-              },
-            ),
+              const SizedBox(height: 10),
+              IgnorePointer(
+                ignoring: printerLocked,
+                child: Opacity(
+                  opacity: printerLocked ? 0.6 : 1,
+                  child: SegmentedButton<String>(
+                    segments: const [
+                      ButtonSegment<String>(
+                        value: 'scale',
+                        label: Text('Scale kg'),
+                        icon: Icon(Icons.scale_outlined),
+                      ),
+                      ButtonSegment<String>(
+                        value: 'manual',
+                        label: Text('Manual kg'),
+                        icon: Icon(Icons.edit_note_rounded),
+                      ),
+                    ],
+                    selected: <String>{selectedQuantitySource},
+                    onSelectionChanged: (selection) {
+                      if (selection.isEmpty) {
+                        return;
+                      }
+                      setState(() {
+                        _quantitySource = normalizeQuantitySource(
+                          selection.first,
+                        );
+                      });
+                    },
+                  ),
+                ),
+              ),
+              if (selectedQuantitySource == 'manual') ...[
+                const SizedBox(height: 10),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _manualQtyController,
+                        enabled: !_batchActionLoading && !_manualPrintLoading,
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
+                        ),
+                        inputFormatters: [
+                          FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]')),
+                        ],
+                        decoration: InputDecoration(
+                          labelText: 'Manual brutto kg',
+                          suffixText: 'kg',
+                          hintText: '5',
+                          errorText: manualQtyInvalid
+                              ? 'Masalan: 5 yoki 4.22'
+                              : null,
+                          border: const OutlineInputBorder(),
+                        ),
+                        onChanged: (_) => setState(() {}),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: SizedBox(
+                        height: 56,
+                        width: 56,
+                        child: IconButton.filled(
+                          tooltip: 'Print',
+                          onPressed:
+                              batchRunning &&
+                                  selectedQuantitySource == 'manual' &&
+                                  manualPrintReady &&
+                                  !_manualPrintLoading &&
+                                  !_batchActionLoading
+                              ? _printManualBatch
+                              : null,
+                          icon: _manualPrintLoading
+                              ? const SizedBox(
+                                  height: 20,
+                                  width: 20,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : const Icon(Icons.play_arrow_rounded),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                if (_manualPrintLoading) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    'Print yuborilmoqda...',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ],
+              const SizedBox(height: 10),
+              IgnorePointer(
+                ignoring: modeLocked || selectedPrinter == 'godex',
+                child: Opacity(
+                  opacity: modeLocked || selectedPrinter == 'godex' ? 0.6 : 1,
+                  child: SegmentedButton<String>(
+                    segments: const [
+                      ButtonSegment<String>(
+                        value: 'rfid',
+                        label: Text('RFID'),
+                        icon: Icon(Icons.memory_rounded),
+                      ),
+                      ButtonSegment<String>(
+                        value: 'label',
+                        label: Text('Label only'),
+                        icon: Icon(Icons.local_printshop_outlined),
+                      ),
+                    ],
+                    selected: <String>{_batchPrintMode},
+                    onSelectionChanged: (selection) {
+                      if (selection.isEmpty) {
+                        return;
+                      }
+                      final nextMode = selection.first;
+                      if (nextMode == _batchPrintMode) {
+                        return;
+                      }
+                      setState(() {
+                        _batchPrintMode = nextMode;
+                      });
+                    },
+                  ),
+                ),
+              ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      style: OutlinedButton.styleFrom(
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                      onPressed: batchRunning && !_batchActionLoading
+                          ? _stopBatch
+                          : null,
+                      icon: const Icon(Icons.stop_rounded),
+                      label: Text(
+                        _batchActionLoading ? 'Stopping...' : 'Batch Stop',
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: FilledButton.icon(
+                      style: FilledButton.styleFrom(
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                      onPressed:
+                          selectedProduct == null ||
+                              (defaultMode
+                                  ? defaultWarehouse.isEmpty
+                                  : selectedWarehouse == null) ||
+                              (_babinaEnabled && babinaKg == null) ||
+                              batchRunning ||
+                              _batchActionLoading
+                          ? null
+                          : _startBatch,
+                      icon: const Icon(Icons.play_arrow_rounded),
+                      label: Text(
+                        _batchActionLoading ? 'Starting...' : 'Batch Start',
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
           ),
-        ),
-        const SizedBox(height: 10),
-        Row(
-          children: [
-            Expanded(
-              child: OutlinedButton.icon(
-                style: OutlinedButton.styleFrom(
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                ),
-                onPressed: batchRunning && !_batchActionLoading
-                    ? _stopBatch
-                    : null,
-                icon: const Icon(Icons.stop_rounded),
-                label: Text(_batchActionLoading ? 'Stopping...' : 'Batch Stop'),
-              ),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: FilledButton.icon(
-                style: FilledButton.styleFrom(
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                ),
-                onPressed:
-                    selectedProduct == null ||
-                        (defaultMode
-                            ? defaultWarehouse.isEmpty
-                            : selectedWarehouse == null) ||
-                        (_babinaEnabled && babinaKg == null) ||
-                        batchRunning ||
-                        _batchActionLoading
-                    ? null
-                    : _startBatch,
-                icon: const Icon(Icons.play_arrow_rounded),
-                label: Text(
-                  _batchActionLoading ? 'Starting...' : 'Batch Start',
-                ),
-              ),
-            ),
-          ],
         ),
       ],
     );
