@@ -2025,14 +2025,27 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
                 icon: Icons.scale_outlined,
               ),
             ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _MiniIconRow(
+                      icon: Icons.print_outlined,
+                      text: printerStatusText,
+                    ),
+                    const SizedBox(height: 8),
+                    _MiniIconRow(
+                      icon: Icons.scale_outlined,
+                      text: _snapshot.scaleConnectionLabel,
+                    ),
+                  ],
+                ),
+              ),
+            ),
           ],
-        ),
-        const SizedBox(height: 12),
-        _MiniIconRow(icon: Icons.print_outlined, text: printerStatusText),
-        const SizedBox(height: 8),
-        _MiniIconRow(
-          icon: Icons.scale_outlined,
-          text: _snapshot.scaleConnectionLabel,
         ),
         const SizedBox(height: 28),
         _SectionLabel(title: 'Item selection', subtitle: ''),
