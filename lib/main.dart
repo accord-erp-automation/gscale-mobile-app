@@ -2054,7 +2054,7 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
           icon: Icons.search_rounded,
           label: 'Mahsulot tanlang',
           value: selectedProduct?.itemCode,
-          subtitle: selectedProduct?.itemName,
+          subtitle: null,
           onTap: batchRunning ? null : _openItemPicker,
         ),
         const SizedBox(height: 28),
@@ -2084,7 +2084,7 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
             icon: Icons.warehouse_outlined,
             label: 'Warehouse tanlang',
             value: selectedWarehouse?.warehouse,
-            subtitle: selectedWarehouse?.caption,
+            subtitle: null,
             onTap: batchRunning ? null : _openWarehousePicker,
           ),
           if (_warehousesError.isNotEmpty) ...[
@@ -2185,6 +2185,7 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
           ),
         ),
         if (selectedQuantitySource == 'manual') ...[
+          const SizedBox(height: 10),
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
