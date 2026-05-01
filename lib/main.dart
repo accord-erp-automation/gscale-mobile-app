@@ -1593,12 +1593,12 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
               child: _buildControlSection(context, theme, scheme, server),
             ),
             1 => _DashboardScrollView(
-              key: const ValueKey('server-section'),
-              child: _buildServerSection(context, theme, scheme, server),
-            ),
-            _ => _DashboardScrollView(
               key: const ValueKey('archive-section'),
               child: _buildArchiveSection(context, theme, scheme, server),
+            ),
+            _ => _DashboardScrollView(
+              key: const ValueKey('server-section'),
+              child: _buildServerSection(context, theme, scheme, server),
             ),
           },
         ),
@@ -1609,7 +1609,7 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
             setState(() {
               _selectedSection = index;
             });
-            if (index == 2) {
+            if (index == 1) {
               unawaited(_refreshArchive());
             }
           },
@@ -1620,14 +1620,14 @@ class _OperatorDashboardPageState extends State<OperatorDashboardPage> {
               label: 'Control',
             ),
             NavigationDestination(
-              icon: Icon(Icons.health_and_safety_outlined),
-              selectedIcon: Icon(Icons.health_and_safety),
-              label: 'Server',
-            ),
-            NavigationDestination(
               icon: Icon(Icons.archive_outlined),
               selectedIcon: Icon(Icons.archive),
               label: 'Archive',
+            ),
+            NavigationDestination(
+              icon: Icon(Icons.health_and_safety_outlined),
+              selectedIcon: Icon(Icons.health_and_safety),
+              label: 'Server',
             ),
           ],
         ),
